@@ -1,0 +1,3774 @@
+--[[
+    TURNopensource
+]]
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local Workspace         = workspace
+local LocalPlayer       = Players.LocalPlayer
+local HttpService       = game:GetService("HttpService")
+local Lighting          = game:GetService("Lighting")
+local TextChatService   = game:GetService("TextChatService")
+local Stats             = game:GetService("Stats")
+local UserInputService  = game:GetService("UserInputService")
+
+local SCRIPT_NAME  = "TURNopensource"
+local AUTHOR       = "TURN team"
+local VERSION      = "1.0"
+
+local WINDUI_URLS = {
+    "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua",
+    "https://raw.githubusercontent.com/Footagesus/WindUI/refs/heads/main/dist/main.lua",
+    "https://cdn.jsdelivr.net/gh/Footagesus/WindUI@main/dist/main.lua",
+}
+
+-- 重复执行时，先清掉上一次的实例
+if getgenv then
+    for _, key in ipairs({ "TURNopensource", "TURN_v1" }) do
+        local old = getgenv()[key]
+        if type(old) == "table" and type(old.Destroy) == "function" then
+            pcall(old.Destroy)
+        end
+    end
+end
+do
+    for _, child in ipairs(Workspace:GetChildren()) do
+        if child.Name:find("TURN_v1_RangeCircle", 1, true)
+            or child.Name:find("TURN_v1_FaceCone", 1, true) then
+            child:Destroy()
+        end
+    end
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local oldFPS = playerGui and playerGui:FindFirstChild("TURN_v1_FPSPing")
+    if oldFPS then oldFPS:Destroy() end
+end
+
+------------------------------------------------------------------------
+-- 基础工具
+------------------------------------------------------------------------
+
+local function warnf(fmt, ...)
+    warn("[" .. SCRIPT_NAME .. "] " .. string.format(fmt, ...))
+end
+
+local function showBootError(message)
+    warnf("%s", message)
+
+    local ok = pcall(function()
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then return end
+
+        local old = playerGui:FindFirstChild("TURN_v1_Error")
+        if old then old:Destroy() end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "TURN_v1_Error"
+        gui.ResetOnSpawn = false
+        gui.DisplayOrder = 999
+        gui.Parent = playerGui
+
+        local frame = Instance.new("Frame")
+        frame.AnchorPoint = Vector2.new(0.5, 0.5)
+        frame.Position = UDim2.fromScale(0.5, 0.3)
+        frame.Size = UDim2.fromOffset(430, 120)
+        frame.BackgroundColor3 = Color3.fromRGB(16, 17, 20)
+        frame.BackgroundTransparency = 0.05
+        frame.BorderSizePixel = 0
+        frame.Parent = gui
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 14)
+        corner.Parent = frame
+
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(255, 88, 88)
+        stroke.Thickness = 1
+        stroke.Transparency = 0.35
+        stroke.Parent = frame
+
+        local title = Instance.new("TextLabel")
+        title.BackgroundTransparency = 1
+        title.Position = UDim2.fromOffset(16, 12)
+        title.Size = UDim2.new(1, -32, 0, 22)
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 15
+        title.TextColor3 = Color3.fromRGB(255, 120, 120)
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.Text = SCRIPT_NAME .. " 启动失败"
+        title.Parent = frame
+
+        local body = Instance.new("TextLabel")
+        body.BackgroundTransparency = 1
+        body.Position = UDim2.fromOffset(16, 38)
+        body.Size = UDim2.new(1, -32, 1, -50)
+        body.Font = Enum.Font.GothamMedium
+        body.TextSize = 13
+        body.TextWrapped = true
+        body.TextColor3 = Color3.fromRGB(226, 228, 233)
+        body.TextXAlignment = Enum.TextXAlignment.Left
+        body.TextYAlignment = Enum.TextYAlignment.Top
+        body.Text = tostring(message)
+        body.Parent = frame
+    end)
+
+    if not ok then
+        warn("[" .. SCRIPT_NAME .. "] 连错误提示都没能显示。")
+    end
+end
+
+------------------------------------------------------------------------
+-- 载入 WindUI
+------------------------------------------------------------------------
+
+local function loadWindUI()
+    local lastError = "unknown"
+
+    for _, url in ipairs(WINDUI_URLS) do
+        local ok, result = pcall(function()
+            local source = game:HttpGet(url)
+            local chunk = loadstring(source)
+            if type(chunk) ~= "function" then
+                error("loadstring 失败")
+            end
+            return chunk()
+        end)
+
+        if ok and typeof(result) == "table" and type(result.CreateWindow) == "function" then
+            return result
+        end
+
+        lastError = tostring(result)
+        warnf("WindUI 载入失败: %s", lastError)
+        task.wait(0.4)
+    end
+
+    return nil, lastError
+end
+
+local WindUI, loadError = loadWindUI()
+if not WindUI then
+    showBootError("WindUI 载入失败，请检查执行器的 HttpGet 是否可用。\n" .. tostring(loadError))
+    return
+end
+
+------------------------------------------------------------------------
+-- 配置
+------------------------------------------------------------------------
+
+local Config = {
+    AutoBlock          = false,
+    Radius             = 18,     -- studs
+    ShowCircle         = true,
+    CircleTransparency = 0.86,   -- 越大越通透
+    Pulse              = true,
+    ToggleKey          = "F1",
+
+    -- 格挡判定
+    SoundBlock         = true,   -- 音效 ID 
+    AnimBlock          = true,   -- 动画白名单
+    BlockReadyCheck    = false,  -- 冷却中不重复发包（默认关更稳）
+    BlockDebug         = false,
+
+    ConfigVersion      = 0,
+
+    -- 面向 / 墙体
+    FaceCheck          = false,
+    FaceAngle          = 180,    -- 检测与扇形共用这个角度
+    FaceDist           = 12,
+    FaceVisual         = false,
+    WallCheck          = false,
+
+    -- ESP
+    ESP                = false,
+    ESPKillers         = true,
+    ESPSurvivors       = false,
+    ESPShowName        = true,
+    ESPColorKiller     = Color3.fromRGB(255, 77, 77),
+    ESPColorSurvivor   = Color3.fromRGB(0, 255, 150),
+    ESPMaxDistance     = 250,
+    ESPShowDistance    = true,
+    ESPGenerators      = false,
+    ESPItems           = false,
+    ESPOther           = false,
+    ESPGlobal          = false,
+    ESPColorGenerator  = Color3.fromRGB(0, 200, 255),
+    ESPColorGlobal     = Color3.fromRGB(255, 255, 255),
+
+    -- Punch Aim
+    PunchAim           = false,
+    PunchAimDuration   = 0.75,
+    PunchAimRange      = 30,
+    AimCamLock         = true,
+    AutoPunch          = false,
+    AutoPunchRange     = 10,
+
+    -- HDT（智能格挡）
+    SmartBlock         = false,
+    SmartBlockRange    = 20,
+    SmartBlockDash     = 8,
+    SmartBlockHold     = 1.5,
+
+    -- 自动化（发电机）
+    GenEnabled         = false,
+    GenCooldown        = 4,
+    GenSpeedUp         = false,
+    GenDisarm          = false,
+
+    -- John Doe
+    JDTrails           = false,
+    JDFootprints       = false,
+    JDSpikes           = false,
+
+    -- 体力
+    StamPreset         = "Original",
+
+    -- Noli
+    NoliNPC            = false,
+    NoliTimer          = false,
+
+    -- 视觉 / 杂项
+    FOV                = 70,
+    FPSPing            = false,
+    ShowChat           = false,
+    DeviceSpoof        = "Original",
+}
+
+------------------------------------------------------------------------
+-- 配置持久化
+------------------------------------------------------------------------
+
+local CONFIG_FILE = "TURNopensource_config.json"
+local LEGACY_CONFIG_FILE = "TURN_v1_config.json"
+local canSave = type(writefile) == "function" and type(readfile) == "function"
+
+local function encodeConfig()
+    local data = {}
+    for key, value in pairs(Config) do
+        if typeof(value) == "Color3" then
+            data[key] = { __color = true, r = value.R, g = value.G, b = value.B }
+        elseif type(value) == "number" or type(value) == "string" or type(value) == "boolean" then
+            data[key] = value
+        end
+    end
+    return data
+end
+
+local function decodeConfig(data)
+    for key, value in pairs(data) do
+        local current = Config[key]
+        if current ~= nil then
+            if typeof(current) == "Color3" and type(value) == "table" and value.__color then
+                Config[key] = Color3.new(
+                    math.clamp(tonumber(value.r) or 1, 0, 1),
+                    math.clamp(tonumber(value.g) or 1, 0, 1),
+                    math.clamp(tonumber(value.b) or 1, 0, 1)
+                )
+            elseif type(value) == type(current) then
+                Config[key] = value
+            end
+        end
+    end
+end
+
+if canSave then
+    local function readConfig(path)
+        local ok, raw = pcall(readfile, path)
+        if not ok or type(raw) ~= "string" then return nil end
+        local decoded, data = pcall(function() return HttpService:JSONDecode(raw) end)
+        if decoded and type(data) == "table" then return data end
+        return nil
+    end
+
+    local data = readConfig(CONFIG_FILE) or readConfig(LEGACY_CONFIG_FILE)
+    if data then
+        decodeConfig(data)
+    end
+end
+
+Config.Radius = math.clamp(tonumber(Config.Radius) or 18, 6, 48)
+Config.CircleTransparency = math.clamp(tonumber(Config.CircleTransparency) or 0.86, 0.55, 0.97)
+Config.ESPMaxDistance = math.clamp(tonumber(Config.ESPMaxDistance) or 250, 60, 800)
+Config.PunchAimDuration = math.clamp(tonumber(Config.PunchAimDuration) or 0.75, 0.1, 2)
+Config.PunchAimRange = math.clamp(tonumber(Config.PunchAimRange) or 30, 5, 100)
+Config.AutoPunchRange = math.clamp(tonumber(Config.AutoPunchRange) or 10, 3, 50)
+Config.GenCooldown = math.clamp(tonumber(Config.GenCooldown) or 4, 1, 8)
+Config.FOV = math.clamp(tonumber(Config.FOV) or 70, 70, 120)
+Config.FaceAngle = math.clamp(tonumber(Config.FaceAngle) or 180, 20, 180)
+Config.FaceDist = math.clamp(tonumber(Config.FaceDist) or 12, 4, 60)
+Config.SmartBlockRange = math.clamp(tonumber(Config.SmartBlockRange) or 20, 5, 40)
+Config.SmartBlockDash = math.clamp(tonumber(Config.SmartBlockDash) or 8, 1, 30)
+Config.SmartBlockHold = math.clamp(tonumber(Config.SmartBlockHold) or 1.5, 0.3, 3)
+
+-- 旧版配置可能把 FaceCheck/WallCheck 存成 true，导致所有格挡被过滤掉；迁移时先关掉
+if (tonumber(Config.ConfigVersion) or 0) < 2 then
+    Config.FaceCheck = false
+    Config.WallCheck = false
+    Config.ToggleKey = "F1"
+    Config.ConfigVersion = 2
+end
+
+if (tonumber(Config.ConfigVersion) or 0) < 3 then
+    Config.BlockReadyCheck = false
+    Config.ConfigVersion = 3
+end
+
+local function oneOf(value, list, fallback)
+    for _, item in ipairs(list) do
+        if value == item then return value end
+    end
+    return fallback
+end
+
+Config.StamPreset = oneOf(Config.StamPreset,
+    { "Original", "Realistic", "Semi-Realistic", "Infinite" }, "Original")
+Config.DeviceSpoof = oneOf(Config.DeviceSpoof,
+    { "Original", "PC", "Mobile", "Console", "Nothing" }, "Original")
+
+local lastSaved = nil
+
+local function saveConfig(force)
+    if not canSave then return end
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(encodeConfig())
+    end)
+    if not ok or not encoded then return end
+    if not force and encoded == lastSaved then return end
+    pcall(function() writefile(CONFIG_FILE, encoded) end)
+    lastSaved = encoded
+end
+
+if canSave then
+    pcall(function()
+        lastSaved = HttpService:JSONEncode(encodeConfig())
+    end)
+end
+
+local TURN = {
+    Version = VERSION,
+    Author  = AUTHOR,
+    Config  = Config,
+    Destroy = nil,
+}
+
+local destroyed = false
+
+------------------------------------------------------------------------
+-- 检测白名单
+------------------------------------------------------------------------
+
+-- 音效 ID（来自「TURN」）
+local SOUND_BLOCK_IDS = {
+    ["115279644374552"] = true,
+    ["101992139107271"] = true,
+    ["112804719674547"] = true,
+    ["87547447319480"]  = true,
+    ["96848111589528"]  = true,
+    ["108046627147848"] = true,
+    ["82523503683150"]  = true,
+    ["116093393819241"] = true,
+    ["17577462807"]     = true,
+    ["81637260987855"]  = true,
+    ["81949895430660"]  = true,
+    ["81607308570768"]  = true,
+    ["91114859004757"]  = true,
+    ["117297744119258"] = true,
+    ["6051772613"]      = true,
+    ["92874610447303"]  = true,
+    ["134638708347928"] = true,
+    ["74238153433253"]  = true,
+    ["125050445249688"] = true,
+    ["117612231009955"] = true,
+    ["133709029886490"] = true,
+    ["135041815780073"] = true,
+}
+
+-- 动画名称白名单（规范化后：小写、去掉空格/下划线/符号）
+local ATTACK_ANIM_NAMES = {
+    punch            = true,
+    walkspeedoverride = true,
+    slash            = true,
+    behead           = true,
+    gashingwound     = true,
+    swing            = true,
+    stab             = true,
+    carvingslash     = true,
+    eviscerate       = true,
+    grasp            = true,
+    lacerate         = true,
+    perforating      = true,
+}
+
+local function normalizeName(text)
+    if type(text) ~= "string" then return "" end
+    return (text:lower():gsub("[^%w]", ""))
+end
+
+------------------------------------------------------------------------
+-- 白色玻璃范围圈
+------------------------------------------------------------------------
+
+local Range = {}
+Range.__index = Range
+
+local RING_SEGMENTS = 56
+
+function Range.new(target)
+    local self = setmetatable({}, Range)
+
+    self.Target = target
+    self.Radius = 0
+    self.Visible = false
+    self.Armed = false
+    self.LastCFrame = nil
+
+    local model = Instance.new("Model")
+    model.Name = "TURN_v1_RangeCircle"
+    self.Model = model
+
+    -- 玻璃填充：一片极薄的白色圆盘
+    local disc = Instance.new("Part")
+    disc.Name = "GlassFill"
+    disc.Shape = Enum.PartType.Cylinder
+    disc.Anchored = true
+    disc.Locked = true
+    disc.CanCollide = false
+    disc.CanQuery = false
+    disc.CanTouch = false
+    disc.CastShadow = false
+    disc.Material = Enum.Material.SmoothPlastic
+    disc.Color = Color3.fromRGB(255, 255, 255)
+    disc.Transparency = Config.CircleTransparency
+    disc.TopSurface = Enum.SurfaceType.Smooth
+    disc.BottomSurface = Enum.SurfaceType.Smooth
+    -- Roblox 的 Cylinder 沿 Y 轴延伸，X/Z 是直径；不加旋转就是平放圆盘
+    disc.Size = Vector3.new(2, 0.05, 2)
+    disc.CFrame = CFrame.new()
+    disc.Parent = model
+    self.Disc = disc
+    self.DiscBase = disc.CFrame
+
+    -- 玻璃边缘：一圈白色细条，拼成完整的圆
+    self.Rim = {}
+    for i = 1, RING_SEGMENTS do
+        local bar = Instance.new("Part")
+        bar.Name = "Rim" .. i
+        bar.Anchored = true
+        bar.Locked = true
+        bar.CanCollide = false
+        bar.CanQuery = false
+        bar.CanTouch = false
+        bar.CastShadow = false
+        bar.Material = Enum.Material.SmoothPlastic
+        bar.Color = Color3.fromRGB(255, 255, 255)
+        bar.Transparency = 0.12
+        bar.TopSurface = Enum.SurfaceType.Smooth
+        bar.BottomSurface = Enum.SurfaceType.Smooth
+        bar.Size = Vector3.new(1, 0.06, 0.18)
+        bar.CFrame = CFrame.new()
+        bar.Parent = model
+        self.Rim[i] = bar
+        self.RimBase = self.RimBase or {}
+        self.RimBase[i] = bar.CFrame
+    end
+
+    self.RayParams = RaycastParams.new()
+    self.RayParams.FilterType = Enum.RaycastFilterType.Exclude
+    self.RayParams.FilterDescendantsInstances = {}
+    self.RayParams.IgnoreWater = true
+
+    model.Parent = nil
+
+    self:SetRadius(Config.Radius)
+    return self
+end
+
+function Range:SetRadius(radius)
+    radius = math.max(1, tonumber(radius) or Config.Radius)
+    if math.abs(radius - self.Radius) < 0.01 then return end
+
+    self.Radius = radius
+    local diameter = radius * 2
+
+    self.Disc.Size = Vector3.new(diameter, 0.05, diameter)
+
+    local step = (math.pi * 2) / RING_SEGMENTS
+    local length = 2 * radius * math.sin(step / 2) * 1.2
+
+    for i, bar in ipairs(self.Rim) do
+        local phi = (i - 1) * step
+        bar.Size = Vector3.new(length, 0.06, 0.18)
+        bar.CFrame = CFrame.new(math.cos(phi) * radius, 0, math.sin(phi) * radius)
+            * CFrame.Angles(0, -phi - math.rad(90), 0)
+        self.RimBase[i] = bar.CFrame
+    end
+
+    self.DiscBase = self.Disc.CFrame
+
+    -- 半径变化时重建了局部坐标，立刻放回杀手脚下，避免闪到世界原点
+    if self.LastCFrame then
+        self:ApplyCFrame(self.LastCFrame)
+    end
+end
+
+-- 直接写每个零件的 CFrame，避免 Model 枢轴带着圆盘旋转，导致圈立起来
+function Range:ApplyCFrame(cf)
+    if not self.Model then return end
+    self.Disc.CFrame = cf * self.DiscBase
+    for i, bar in ipairs(self.Rim) do
+        bar.CFrame = cf * self.RimBase[i]
+    end
+end
+
+function Range:SetVisible(visible)
+    self.Visible = visible
+    if not visible and self.Model.Parent then
+        self.Model.Parent = nil
+    end
+end
+
+function Range:SetArmed(armed)
+    self.Armed = armed
+    local transparency = armed and 0.02 or 0.12
+    for _, bar in ipairs(self.Rim) do
+        bar.Transparency = transparency
+    end
+end
+
+function Range:Flash()
+    if not self.Model then return end
+    for _, bar in ipairs(self.Rim) do
+        bar.Transparency = 0
+    end
+
+    task.delay(0.12, function()
+        if not self.Model then return end
+        local transparency = self.Armed and 0.02 or 0.12
+        for _, bar in ipairs(self.Rim) do
+            bar.Transparency = transparency
+        end
+    end)
+end
+
+function Range:Update(dt)
+    if not self.Visible then
+        if self.Model.Parent then self.Model.Parent = nil end
+        return
+    end
+
+    local target = self.Target
+    local root = target and target.Parent and target:FindFirstChild("HumanoidRootPart")
+    local humanoid = target and target:FindFirstChildOfClass("Humanoid")
+    if not root or (humanoid and humanoid.Health <= 0) then
+        if self.Model.Parent then self.Model.Parent = nil end
+        return
+    end
+
+    local origin = root.Position
+
+    self.RayParams.FilterDescendantsInstances = { target }
+    local hit = Workspace:Raycast(origin, Vector3.new(0, -14, 0), self.RayParams)
+    local groundY = hit and (hit.Position.Y + 0.06) or (origin.Y - 2.7)
+
+    -- 0 帧：直接贴到杀手脚下，不做插值
+    local cf = CFrame.new(origin.X, groundY, origin.Z)
+    self.LastCFrame = cf
+    self:ApplyCFrame(cf)
+
+    if self.Model.Parent ~= Workspace then
+        self.Model.Parent = Workspace
+    end
+
+    local pulse = 0
+    if Config.Pulse then
+        local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local near = false
+        if myRoot then
+            local dx = myRoot.Position.X - origin.X
+            local dz = myRoot.Position.Z - origin.Z
+            near = math.sqrt(dx * dx + dz * dz) <= Config.Radius
+        end
+        local speed = (Config.AutoBlock and near) and 4.2 or 2.0
+        pulse = math.sin(os.clock() * speed) * 0.035
+    end
+    self.Disc.Transparency = math.clamp(Config.CircleTransparency + pulse, 0.35, 0.98)
+end
+
+function Range:Destroy()
+    if self.Model then
+        self.Model:Destroy()
+        self.Model = nil
+    end
+    self.Target = nil
+end
+
+------------------------------------------------------------------------
+-- 范围扫描
+------------------------------------------------------------------------
+
+local function getKillerFolder()
+    local playersFolder = Workspace:FindFirstChild("Players")
+    local folder = playersFolder and playersFolder:FindFirstChild("Killers")
+    return folder or Workspace:FindFirstChild("Killers")
+end
+
+local function getSurvivorsFolder()
+    local playersFolder = Workspace:FindFirstChild("Players")
+    local folder = playersFolder and playersFolder:FindFirstChild("Survivors")
+    return folder or Workspace:FindFirstChild("Survivors")
+end
+
+local function getInGame()
+    local map = Workspace:FindFirstChild("Map")
+    return map and map:FindFirstChild("Ingame")
+end
+
+local function getGameMap()
+    local inGame = getInGame()
+    return inGame and inGame:FindFirstChild("Map")
+end
+
+-- 「最后记忆」的杀手角色被放进 workspace.Players.Killers；
+-- 找不到这个分组时，退化为「所有其他玩家」，方便其它场景复用。
+local function getCandidates()
+    local folder = getKillerFolder()
+    local list = {}
+
+    if folder then
+        local seen = {}
+        local function add(model)
+            if model:IsA("Model") and not seen[model] then
+                seen[model] = true
+                list[#list + 1] = {
+                    Model = model,
+                    Player = Players:GetPlayerFromCharacter(model),
+                }
+            end
+        end
+
+        for _, child in ipairs(folder:GetChildren()) do
+            add(child)
+        end
+        for _, child in ipairs(folder:GetDescendants()) do
+            add(child)
+        end
+    else
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                list[#list + 1] = { Model = player.Character, Player = player }
+            end
+        end
+    end
+
+    return list
+end
+
+local function getTargetsInRange(radius)
+    local result = {}
+
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then return result end
+
+    local origin = root.Position
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+
+        if model and model ~= character and model.Parent then
+            local otherRoot = model:FindFirstChild("HumanoidRootPart")
+                or model:FindFirstChild("QueryHitbox")
+                or model:FindFirstChild("Torso")
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+            if otherRoot and humanoid and humanoid.Health > 0 then
+                local dx = otherRoot.Position.X - origin.X
+                local dz = otherRoot.Position.Z - origin.Z
+                local distance = math.sqrt(dx * dx + dz * dz)
+
+                if distance <= radius then
+                    table.insert(result, {
+                        Player   = candidate.Player,
+                        Model    = model,
+                        Name     = candidate.Player and candidate.Player.Name or model.Name,
+                        Distance = distance,
+                    })
+                end
+            end
+        end
+    end
+
+    table.sort(result, function(a, b)
+        return a.Distance < b.Distance
+    end)
+
+    return result
+end
+
+------------------------------------------------------------------------
+-- 杀手脚下的白色玻璃圈
+------------------------------------------------------------------------
+
+local rings = {}
+
+local function syncRings()
+    if destroyed then return end
+
+    local wanted = {}
+    if Config.ShowCircle then
+        for _, candidate in ipairs(getCandidates()) do
+            local model = candidate.Model
+            if model and model.Parent and model ~= LocalPlayer.Character then
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    wanted[model] = true
+                end
+            end
+        end
+    end
+
+    for model in pairs(wanted) do
+        if not rings[model] then
+            local ring = Range.new(model)
+            ring:SetRadius(Config.Radius)
+            ring:SetArmed(Config.AutoBlock)
+            ring:SetVisible(true)
+            rings[model] = ring
+        end
+    end
+
+    for model, ring in pairs(rings) do
+        if not wanted[model] then
+            ring:Destroy()
+            rings[model] = nil
+        end
+    end
+end
+
+local function setRingsVisible(visible)
+    Config.ShowCircle = visible
+    for _, ring in pairs(rings) do
+        ring:SetVisible(visible)
+    end
+    if visible then syncRings() end
+end
+
+local function setRingsArmed(armed)
+    for _, ring in pairs(rings) do
+        ring:SetArmed(armed)
+    end
+end
+
+local function setRingsRadius(radius)
+    for _, ring in pairs(rings) do
+        ring:SetRadius(radius)
+    end
+end
+
+------------------------------------------------------------------------
+-- 格挡动作：最后记忆的 Block 技能（按钮 firesignal / Network 远端）
+------------------------------------------------------------------------
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local FireSignal = nil
+do
+    local function pick(fn)
+        if type(fn) == "function" then return fn end
+        return nil
+    end
+
+    local ok1, f1 = pcall(function() return firesignal end)
+    if ok1 then FireSignal = pick(f1) end
+
+    if not FireSignal then
+        local ok2, f2 = pcall(function() return fire_signal end)
+        if ok2 then FireSignal = pick(f2) end
+    end
+
+    if not FireSignal and type(getgenv) == "function" then
+        local ok3, f3 = pcall(function() return getgenv().firesignal end)
+        if ok3 then FireSignal = pick(f3) end
+    end
+end
+
+local function isRemoteInstance(instance)
+    if not instance then return false end
+    local ok, result = pcall(function()
+        return instance:IsA("RemoteEvent") or instance:IsA("UnreliableRemoteEvent")
+    end)
+    return ok and result or false
+end
+
+local REMOTE_PATHS = {
+    { "Modules", "Network", "Network", "RemoteEvent" },
+    { "Modules", "Network", "RemoteEvent" },
+}
+
+local blockRemote = nil
+
+local function tryRemotePath(path)
+    local ok, node = pcall(function()
+        local current = ReplicatedStorage
+        for _, name in ipairs(path) do
+            current = current:FindFirstChild(name)
+            if not current then return nil end
+        end
+        return current
+    end)
+
+    if ok then
+        if isRemoteInstance(node) then return node end
+        if node then
+            local child = node:FindFirstChildOfClass("RemoteEvent")
+            if isRemoteInstance(child) then return child end
+        end
+    end
+    return nil
+end
+
+local function ensureBlockRemote()
+    if blockRemote and blockRemote.Parent then return blockRemote end
+    blockRemote = nil
+
+    -- 优先找 Modules/Network 下真正的 RemoteEvent
+    local okDeep, deepRemote = pcall(function()
+        local modules = ReplicatedStorage:FindFirstChild("Modules")
+        if not modules then return nil end
+        local network = modules:FindFirstChild("Network", true)
+        if not network then return nil end
+        local inner = network:FindFirstChild("Network")
+        local target = inner or network
+        return target:FindFirstChildOfClass("RemoteEvent")
+            or network:FindFirstChildOfClass("RemoteEvent")
+    end)
+
+    if okDeep and isRemoteInstance(deepRemote) then
+        blockRemote = deepRemote
+        return deepRemote
+    end
+
+    for _, path in ipairs(REMOTE_PATHS) do
+        local remote = tryRemotePath(path)
+        if remote then
+            blockRemote = remote
+            return remote
+        end
+    end
+    return nil
+end
+
+local abilityButtonCache = {}
+
+local function getAbilityButton(name)
+    local cached = abilityButtonCache[name]
+    if cached and cached.Parent then return cached end
+    abilityButtonCache[name] = nil
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local mainUI = playerGui and playerGui:FindFirstChild("MainUI")
+    local container = mainUI and mainUI:FindFirstChild("AbilityContainer")
+    if not container then return nil end
+
+    local button = container:FindFirstChild(name) or container:FindFirstChild(name, true)
+    if button then
+        abilityButtonCache[name] = button
+    end
+    return button
+end
+
+local COOLDOWN_LABELS = {
+    CooldownTime = true,
+    Cooldown = true,
+    TimeLeft = true,
+    Timer = true,
+}
+
+local function blockAbilityReady()
+    local button = getAbilityButton("Block")
+    if not button then return true end
+
+    local ok, ready = pcall(function()
+        for _, child in ipairs(button:GetDescendants()) do
+            if child:IsA("TextLabel") and COOLDOWN_LABELS[child.Name] then
+                local number = tonumber(tostring(child.Text):match("[%d%.]+"))
+                if number and number > 0.05 then
+                    return false
+                end
+            end
+        end
+        return true
+    end)
+
+    if not ok then return true end
+    return ready and true or false
+end
+
+local function fireBlockAbility()
+    local button = getAbilityButton("Block")
+    if FireSignal and button then
+        local ok = pcall(function()
+            FireSignal(button.MouseButton1Down)
+            FireSignal(button.MouseButton1Click)
+        end)
+        if ok then return true end
+    end
+
+    local remote = ensureBlockRemote()
+    if not remote then return false end
+
+    local ok = pcall(function()
+        remote:FireServer("UseActorAbility", "Block")
+        remote:FireServer("UseActorAbility", { "Block" })
+    end)
+    return ok
+end
+
+local function localRoot()
+    local character = LocalPlayer.Character
+    return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function targetRoot(model)
+    if not model then return nil end
+    return model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("QueryHitbox")
+        or model:FindFirstChild("Torso")
+end
+
+local function distanceToLocal(model)
+    local root = localRoot()
+    local other = targetRoot(model)
+    if not (root and other) then return nil end
+
+    local dx = other.Position.X - root.Position.X
+    local dz = other.Position.Z - root.Position.Z
+    return math.sqrt(dx * dx + dz * dz)
+end
+
+local function isInCircle(model)
+    local distance = distanceToLocal(model)
+    return distance ~= nil and distance <= Config.Radius + 0.25
+end
+
+local function isLocalKiller()
+    local folder = getKillerFolder()
+    local character = LocalPlayer.Character
+    return folder ~= nil and character ~= nil and character.Parent == folder
+end
+
+local function isKillerModel(model)
+    if not model or model == LocalPlayer.Character then return false end
+
+    local folder = getKillerFolder()
+    if folder then
+        if model.Parent == folder or model:IsDescendantOf(folder) then
+            return true
+        end
+    end
+
+    if model:FindFirstAncestor("Killers") then return true end
+
+    local ok, isKiller = pcall(function() return model:GetAttribute("IsKiller") end)
+    if ok and isKiller == true then return true end
+
+    if not folder then return true end
+    return false
+end
+
+local function killerFacesMe(killer)
+    if not Config.FaceCheck then return true end
+
+    local myRoot = localRoot()
+    local killerRoot = targetRoot(killer)
+    if not (myRoot and killerRoot) then return true end
+
+    local look = killerRoot.CFrame.LookVector
+    local toMe = myRoot.Position - killerRoot.Position
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    local flatTo = Vector3.new(toMe.X, 0, toMe.Z)
+    if flatLook.Magnitude < 1e-3 or flatTo.Magnitude < 1e-3 then return true end
+
+    local halfAngle = math.clamp(Config.FaceAngle or 180, 20, 180) / 2
+    local minDot = math.cos(math.rad(halfAngle))
+    return flatLook.Unit:Dot(flatTo.Unit) >= minDot
+end
+
+local function wallBetween(killer)
+    if not Config.WallCheck then return false end
+
+    local myCharacter = LocalPlayer.Character
+    local myRoot = localRoot()
+    local killerRoot = targetRoot(killer)
+    if not (myCharacter and myRoot and killerRoot) then return false end
+
+    local ok, blocked = pcall(function()
+        local from = myRoot.Position + Vector3.new(0, 1.5, 0)
+        local to = killerRoot.Position + Vector3.new(0, 1.5, 0)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { myCharacter, killer }
+        params.IgnoreWater = true
+        local hit = Workspace:Raycast(from, to - from, params)
+        if not hit or not hit.Instance then return false end
+
+        -- 别的角色/杀手不算墙；多杀手贴在一起时不能互相挡住
+        local hitModel = hit.Instance:FindFirstAncestorOfClass("Model")
+        if hitModel and hitModel:FindFirstChildOfClass("Humanoid") then
+            return false
+        end
+
+        return hit.Instance.CanCollide == true
+    end)
+
+    return ok and blocked == true
+end
+
+local function findBlockableKiller(position)
+    local best, bestScore = nil, math.huge
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+        if model and model.Parent and model ~= LocalPlayer.Character then
+            local distance = distanceToLocal(model)
+            if distance and distance <= Config.Radius + 0.25
+                and killerFacesMe(model)
+                and not wallBetween(model) then
+                local score = distance
+                if position then
+                    local root = targetRoot(model)
+                    if root then
+                        score = (root.Position - position).Magnitude
+                    end
+                end
+                if score < bestScore then
+                    best, bestScore = model, score
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+local BLOCK_DEBOUNCE = 0.25
+local lastBlockAt = 0
+
+local function triggerBlock(killer, source)
+    if destroyed or not Config.AutoBlock then return false end
+    if not killer or not killer.Parent then return false end
+    if killer == LocalPlayer.Character then return false end
+    if isLocalKiller() then return false end
+    if not isKillerModel(killer) then return false end
+
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+
+    if not isInCircle(killer) then return false end
+    if not killerFacesMe(killer) then return false end
+    if wallBetween(killer) then return false end
+
+    local now = os.clock()
+    if now - lastBlockAt < BLOCK_DEBOUNCE then return false end
+    if Config.BlockReadyCheck and not blockAbilityReady() then return false end
+    lastBlockAt = now
+
+    local ok = fireBlockAbility()
+    if Config.BlockDebug then
+        print(string.format("[TURNopensource] block <- %s | %s | dist=%.1f | ok=%s",
+            tostring(killer.Name), tostring(source), distanceToLocal(killer) or -1, tostring(ok)))
+    end
+
+    if ok then
+        local ring = rings[killer]
+        if ring then
+            pcall(function() ring:Flash() end)
+        end
+    end
+    return ok
+end
+
+------------------------------------------------------------------------
+-- 面向扇形可视化（每个杀手脚下，和检测共用同一个 FaceAngle）
+------------------------------------------------------------------------
+
+local faceCones = {}
+
+local function makeConePart(shape)
+    local part = Instance.new("Part")
+    part.Name = "TURN_v1_FaceCone"
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.CastShadow = false
+    part.Material = Enum.Material.Neon
+    part.Color = Color3.fromRGB(255, 60, 60)
+    part.Transparency = 1
+    if shape then part.Shape = shape end
+    part.Parent = Workspace
+    return part
+end
+
+local function createFaceCone()
+    local cone = {
+        Lines = {},
+        Tips = {},
+        Params = RaycastParams.new(),
+    }
+    cone.Params.FilterType = Enum.RaycastFilterType.Exclude
+    cone.Params.IgnoreWater = true
+
+    for i = 1, 4 do
+        local part = makeConePart(nil)
+        part.Size = Vector3.new(0.12, 0.12, 1)
+        cone.Lines[i] = part
+    end
+    for i = 1, 3 do
+        local part = makeConePart(Enum.PartType.Ball)
+        part.Size = Vector3.new(0.5, 0.5, 0.5)
+        cone.Tips[i] = part
+    end
+
+    return cone
+end
+
+local function setConeLine(part, a, b)
+    local distance = (b - a).Magnitude
+    if distance < 1e-3 then
+        part.Transparency = 1
+        return
+    end
+    part.Size = Vector3.new(0.12, 0.12, distance)
+    part.CFrame = CFrame.new((a + b) / 2, b)
+    part.Transparency = 0.15
+end
+
+local function syncFaceCones()
+    if destroyed then return end
+
+    local wanted = {}
+    if Config.FaceVisual then
+        for _, candidate in ipairs(getCandidates()) do
+            local model = candidate.Model
+            if model and model.Parent and model ~= LocalPlayer.Character then
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    wanted[model] = true
+                end
+            end
+        end
+    end
+
+    for model in pairs(wanted) do
+        if not faceCones[model] then
+            faceCones[model] = createFaceCone()
+        end
+    end
+
+    for model, cone in pairs(faceCones) do
+        if not wanted[model] then
+            for _, part in ipairs(cone.Lines) do part:Destroy() end
+            for _, part in ipairs(cone.Tips) do part:Destroy() end
+            faceCones[model] = nil
+        end
+    end
+end
+
+local function updateFaceCones()
+    if destroyed then return end
+
+    for model, cone in pairs(faceCones) do
+        local root = targetRoot(model)
+        local humanoid = model:FindFirstChildOfClass("Humanoid")
+        if not root or not model.Parent or (humanoid and humanoid.Health <= 0) or not Config.FaceVisual then
+            for _, part in ipairs(cone.Lines) do part.Transparency = 1 end
+            for _, part in ipairs(cone.Tips) do part.Transparency = 1 end
+        else
+            local look = root.CFrame.LookVector
+            local flat = Vector3.new(look.X, 0, look.Z)
+            if flat.Magnitude < 1e-3 then
+                for _, part in ipairs(cone.Lines) do part.Transparency = 1 end
+                for _, part in ipairs(cone.Tips) do part.Transparency = 1 end
+            else
+                flat = flat.Unit
+                cone.Params.FilterDescendantsInstances = { model }
+                local hit = Workspace:Raycast(root.Position, Vector3.new(0, -14, 0), cone.Params)
+                local groundY = hit and (hit.Position.Y + 0.12) or (root.Position.Y - 2.5)
+                local origin = Vector3.new(root.Position.X, groundY, root.Position.Z)
+
+                local half = math.rad(math.clamp(Config.FaceAngle, 20, 180) / 2)
+                local right = Vector3.new(-flat.Z, 0, flat.X)
+                local leftDir = (flat * math.cos(half) + right * math.sin(half)).Unit
+                local rightDir = (flat * math.cos(half) - right * math.sin(half)).Unit
+                local distance = Config.FaceDist
+                local tip = origin + flat * distance
+                local leftPoint = origin + leftDir * distance
+                local rightPoint = origin + rightDir * distance
+
+                setConeLine(cone.Lines[1], origin, leftPoint)
+                setConeLine(cone.Lines[2], origin, rightPoint)
+                setConeLine(cone.Lines[3], leftPoint, tip)
+                setConeLine(cone.Lines[4], tip, rightPoint)
+
+                cone.Tips[1].Position = tip
+                cone.Tips[2].Position = leftPoint
+                cone.Tips[3].Position = rightPoint
+
+                local color = (isInCircle(model) and Config.AutoBlock)
+                    and Color3.fromRGB(0, 255, 110)
+                    or Color3.fromRGB(255, 60, 60)
+
+                for _, part in ipairs(cone.Lines) do
+                    part.Color = color
+                    part.Transparency = 0.15
+                end
+                for _, part in ipairs(cone.Tips) do
+                    part.Color = color
+                    part.Transparency = 0.2
+                end
+            end
+        end
+    end
+end
+
+------------------------------------------------------------------------
+-- 攻击检测：音效 ID + 动画白名单
+------------------------------------------------------------------------
+
+local watchedSounds = setmetatable({}, { __mode = "k" })
+local hookedModels = setmetatable({}, { __mode = "k" })
+local hookedAnimators = setmetatable({}, { __mode = "k" })
+
+local function soundIdOf(sound)
+    if not sound then return nil end
+    local ok, raw = pcall(function() return sound.SoundId end)
+    if not ok or not raw then return nil end
+    return tostring(raw):match("%d+")
+end
+
+local function findOwnerModel(instance)
+    local node = instance
+    for _ = 1, 10 do
+        node = node.Parent
+        if not node or node == Workspace then return nil end
+        if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid") then
+            return node
+        end
+    end
+    return nil
+end
+
+local function nearestKiller(position)
+    local best, bestDistance = nil, math.huge
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+        if model and model.Parent and model ~= LocalPlayer.Character then
+            local root = targetRoot(model)
+            if root then
+                local distance
+                if position then
+                    distance = (root.Position - position).Magnitude
+                else
+                    distance = distanceToLocal(model)
+                end
+                if distance and distance < bestDistance then
+                    best, bestDistance = model, distance
+                end
+            end
+        end
+    end
+
+    return best, bestDistance
+end
+
+local function resolveKillerForSound(sound)
+    local owner = findOwnerModel(sound)
+
+    if owner == LocalPlayer.Character then
+        -- 命中音效挂在本地角色身上：从所有圈内杀手里挑一个能格挡的
+        return findBlockableKiller(nil)
+    end
+
+    if owner then
+        -- 音效明确属于某个杀手：只认这个杀手，避免多杀手时串线
+        if isKillerModel(owner) then return owner end
+        return nil
+    end
+
+    local parent = sound.Parent
+    if parent and parent:IsA("BasePart") then
+        -- 无主音效挂在特效部件上：挑离音效最近、且在圈内/面向/无墙的杀手
+        local killer = findBlockableKiller(parent.Position)
+        if killer then
+            local root = targetRoot(killer)
+            if root and (root.Position - parent.Position).Magnitude <= 16 then
+                return killer
+            end
+        end
+        return nil
+    end
+
+    -- 全局音效：多杀手时不能只看最近，要找一个真正能挡的
+    return findBlockableKiller(nil)
+end
+
+local function watchSound(sound)
+    if watchedSounds[sound] then return end
+    if not sound:IsA("Sound") then return end
+
+    local id = soundIdOf(sound)
+    if not id or not SOUND_BLOCK_IDS[id] then return end
+    watchedSounds[sound] = true
+
+    local function check()
+        if destroyed or not Config.AutoBlock or not Config.SoundBlock then return end
+
+        local currentId = soundIdOf(sound)
+        if not currentId or not SOUND_BLOCK_IDS[currentId] then return end
+
+        local killer = resolveKillerForSound(sound)
+        if killer then
+            triggerBlock(killer, "sound:" .. currentId)
+        end
+    end
+
+    sound.Played:Connect(function()
+        pcall(check)
+    end)
+    sound:GetPropertyChangedSignal("Playing"):Connect(function()
+        if sound.Playing then pcall(check) end
+    end)
+    sound:GetPropertyChangedSignal("SoundId"):Connect(function()
+        local currentId = soundIdOf(sound)
+        if currentId and SOUND_BLOCK_IDS[currentId] then
+            pcall(check)
+        end
+    end)
+
+    if sound.Playing then check() end
+end
+
+local function isAttackAnimation(name)
+    local normalized = normalizeName(name)
+    if normalized == "" then return false end
+    if ATTACK_ANIM_NAMES[normalized] then return true end
+
+    for key in pairs(ATTACK_ANIM_NAMES) do
+        if normalized:find(key, 1, true) then return true end
+    end
+    return false
+end
+
+local scannedTrackAt = setmetatable({}, { __mode = "k" })
+
+local function animationNameOf(track)
+    local animation = track and track.Animation
+    return (animation and animation.Name) or (track and track.Name) or ""
+end
+
+local function checkAnimation(killer, track)
+    if destroyed or not Config.AutoBlock or not Config.AnimBlock then return end
+    if not killer or not killer.Parent or not track then return end
+
+    local name = animationNameOf(track)
+    if not isAttackAnimation(name) then return end
+
+    local now = os.clock()
+    if now - (scannedTrackAt[track] or 0) < 0.3 then return end
+    scannedTrackAt[track] = now
+
+    triggerBlock(killer, "anim:" .. tostring(name))
+end
+
+local function scanPlayingAnimations()
+    for animator, killer in pairs(hookedAnimators) do
+        if killer and killer.Parent and animator.Parent then
+            local ok, tracks = pcall(function()
+                return animator:GetPlayingAnimationTracks()
+            end)
+
+            if ok then
+                for _, track in ipairs(tracks) do
+                    -- 只兜底“漏掉的起手”：已经由 AnimationPlayed 处理过的不重复扫
+                    if not scannedTrackAt[track] then
+                        checkAnimation(killer, track)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function hookAnimator(killer, animator)
+    if not animator or hookedAnimators[animator] then return end
+    hookedAnimators[animator] = killer
+
+    animator.AnimationPlayed:Connect(function(track)
+        pcall(checkAnimation, killer, track)
+    end)
+
+    pcall(function()
+        for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+            checkAnimation(killer, track)
+        end
+    end)
+end
+
+local function hookKillerModel(model)
+    if hookedModels[model] then return end
+    hookedModels[model] = true
+
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        hookAnimator(model, humanoid:FindFirstChildOfClass("Animator"))
+    end
+
+    for _, descendant in ipairs(model:GetDescendants()) do
+        if descendant:IsA("Sound") then
+            watchSound(descendant)
+        end
+    end
+
+    model.DescendantAdded:Connect(function(descendant)
+        if destroyed then return end
+        pcall(function()
+            if descendant:IsA("Sound") then
+                watchSound(descendant)
+            elseif descendant:IsA("Animator") then
+                hookAnimator(model, descendant)
+            end
+        end)
+    end)
+end
+
+local watchedKillerFolder = nil
+
+local function ensureKillerFolderHook()
+    local folder = getKillerFolder()
+    if folder and folder ~= watchedKillerFolder then
+        watchedKillerFolder = folder
+        folder.ChildAdded:Connect(function(model)
+            if destroyed then return end
+            pcall(function()
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    hookKillerModel(model)
+                end
+                syncRings()
+                syncFaceCones()
+            end)
+        end)
+    end
+end
+
+local function scanDetection()
+    if destroyed then return end
+
+    ensureKillerFolderHook()
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+        if model and model.Parent then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            if not humanoid or humanoid.Health > 0 then
+                hookKillerModel(model)
+            end
+        end
+    end
+
+    scanPlayingAnimations()
+    syncRings()
+    syncFaceCones()
+end
+
+------------------------------------------------------------------------
+-- ESP：Plus 风格（Killers / Survivors / Generators / Items / Other）
+------------------------------------------------------------------------
+
+local ESP = {
+    Records = {},
+}
+
+local function espColors(color)
+    local h, s, v = color:ToHSV()
+    return Color3.fromHSV(h, s, math.clamp(v * 0.8, 0, 1)),
+        Color3.fromHSV(h, s, math.clamp(v * 1.1, 0, 1))
+end
+
+local function destroyESPRecord(record)
+    if not record then return end
+    if record.Highlight then
+        pcall(function() record.Highlight:Destroy() end)
+    end
+    if record.Billboard then
+        pcall(function() record.Billboard:Destroy() end)
+    end
+    record.Highlight = nil
+    record.Billboard = nil
+end
+
+local function espRootOf(instance)
+    if not instance then return nil end
+
+    if instance:IsA("Model") then
+        return instance:FindFirstChild("HumanoidRootPart")
+            or instance:FindFirstChild("Head")
+            or instance.PrimaryPart
+            or instance:FindFirstChildWhichIsA("BasePart", true)
+    elseif instance:IsA("BasePart") then
+        return instance
+    elseif instance:IsA("Tool") then
+        return instance:FindFirstChild("Handle")
+            or instance:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function distanceText(root)
+    if not Config.ESPShowDistance or not root then return "" end
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return "" end
+    return string.format(" [%dm]", math.floor((root.Position - myRoot.Position).Magnitude))
+end
+
+local function humanoidText(model, humanoid)
+    local root = espRootOf(model)
+    return model.Name .. string.format(" HP:%d", math.floor(humanoid.Health)) .. distanceText(root)
+end
+
+local function createESPRecord(instance, color, textFunc)
+    local root = espRootOf(instance)
+    if not root then return nil end
+
+    local adornee = instance:IsA("Model") and instance or root
+    local fill, outline = espColors(color)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "TURN_v1_ESP"
+    highlight.Adornee = adornee
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillColor = fill
+    highlight.OutlineColor = outline
+    highlight.FillTransparency = 0.75
+    highlight.OutlineTransparency = 0.08
+    highlight.Parent = adornee
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "TURN_v1_ESP_Name"
+    billboard.Adornee = root
+    billboard.AlwaysOnTop = true
+    billboard.Size = UDim2.fromOffset(210, 26)
+    billboard.StudsOffset = Vector3.new(0, 3.4, 0)
+    billboard.MaxDistance = 600
+    billboard.ResetOnSpawn = false
+    billboard.Parent = root
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Name"
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 14
+    label.TextStrokeTransparency = 0.25
+    label.TextColor3 = outline
+    local okText, text = pcall(textFunc)
+    label.Text = okText and text or tostring(instance.Name)
+    label.Parent = billboard
+
+    return {
+        Instance = instance,
+        Color = color,
+        TextFunc = textFunc,
+        Highlight = highlight,
+        Billboard = billboard,
+        Label = label,
+    }
+end
+
+local function updateESPRecord(record)
+    local instance = record.Instance
+    if not instance or not instance.Parent then return false end
+
+    local root = espRootOf(instance)
+    if not root then return false end
+
+    local humanoid = instance:IsA("Model") and instance:FindFirstChildOfClass("Humanoid") or nil
+    if humanoid and humanoid.Health <= 0 then return false end
+
+    if not record.Highlight or not record.Highlight.Parent then return false end
+    if not record.Billboard or not record.Billboard.Parent then return false end
+
+    local camera = Workspace.CurrentCamera
+    if not camera then return true end
+
+    local distance = (camera.CFrame.Position - root.Position).Magnitude
+    local maxDistance = math.max(Config.ESPMaxDistance, 30)
+
+    if distance > maxDistance then
+        record.Highlight.Enabled = false
+        record.Billboard.Enabled = false
+        return true
+    end
+
+    local normalized = math.clamp((distance - 8) / math.max(maxDistance - 8, 1), 0, 1)
+    local fill, outline = espColors(record.Color)
+
+    record.Highlight.Enabled = true
+    record.Highlight.FillColor = fill
+    record.Highlight.OutlineColor = outline
+    record.Highlight.FillTransparency = 0.42 + normalized * 0.5
+    record.Highlight.OutlineTransparency = normalized * 0.85
+
+    record.Billboard.Enabled = Config.ESPShowName
+    record.Billboard.MaxDistance = maxDistance + 50
+    record.Label.TextColor3 = outline
+    record.Label.TextTransparency = normalized * 0.55
+    record.Label.TextStrokeTransparency = 0.25 + normalized * 0.55
+
+    local okText, text = pcall(record.TextFunc)
+    if okText and text then
+        record.Label.Text = text
+    end
+
+    return true
+end
+
+local function addHumanoids(targets, folder, enabled, color)
+    if not enabled or not folder then return end
+
+    for _, model in ipairs(folder:GetChildren()) do
+        if model:IsA("Model") and model ~= LocalPlayer.Character then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                targets[model] = {
+                    Color = color,
+                    TextFunc = function()
+                        return humanoidText(model, humanoid)
+                    end,
+                }
+            end
+        end
+    end
+end
+
+local function addGlobalHumanoids(targets)
+    if not Config.ESPGlobal then return end
+
+    local function add(model)
+        if not model or model == LocalPlayer.Character or targets[model] then return end
+        local humanoid = model:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Health > 0 then
+            targets[model] = {
+                Color = Config.ESPColorGlobal,
+                TextFunc = function()
+                    return humanoidText(model, humanoid)
+                end,
+            }
+        end
+    end
+
+    local playersFolder = Workspace:FindFirstChild("Players")
+    if playersFolder then
+        for _, model in ipairs(playersFolder:GetDescendants()) do
+            if model:IsA("Model") then add(model) end
+        end
+    else
+        for _, player in ipairs(Players:GetPlayers()) do
+            add(player.Character)
+        end
+    end
+end
+
+local function addGenerators(targets)
+    if not (Config.ESPGenerators or Config.ESPGlobal) then return end
+
+    local gameMap = getGameMap()
+    if not gameMap then return end
+
+    for _, generator in ipairs(gameMap:GetChildren()) do
+        if generator:IsA("Model") and generator.Name == "Generator" then
+            local main = generator:FindFirstChild("Main")
+            if main then
+                local color = Config.ESPGenerators and Config.ESPColorGenerator or Config.ESPColorGlobal
+                targets[generator] = {
+                    Color = color,
+                    TextFunc = function()
+                        local progress = generator:FindFirstChild("Progress")
+                        local value = math.floor(tonumber(progress and progress.Value) or 0)
+                        return string.format("发电机 %d%%", value) .. distanceText(main)
+                    end,
+                }
+            end
+        end
+    end
+end
+
+local function addItems(targets)
+    if not (Config.ESPItems or Config.ESPGlobal) then return end
+
+    local inGame = getInGame()
+    if not inGame then return end
+
+    for _, object in ipairs(inGame:GetDescendants()) do
+        if object:IsA("Tool")
+            and not (object.Parent and object.Parent:IsA("Model")
+                and object.Parent:FindFirstChildOfClass("Humanoid")) then
+            local color = Config.ESPItems and Color3.fromRGB(255, 215, 0) or Config.ESPColorGlobal
+            targets[object] = {
+                Color = color,
+                TextFunc = function()
+                    return (Config.ESPItems and "物品: " or "") .. object.Name
+                end,
+            }
+        end
+    end
+end
+
+local OTHER_ESP = {
+    VineModel = "藤蔓",
+    GroundBulbModel = "灯泡",
+    SubspaceTripmine = "地雷",
+    BuildermanDispenser = "建造机",
+    BuildermanSentry = "哨兵",
+}
+
+local function addOther(targets)
+    if not Config.ESPOther then return end
+
+    local inGame = getInGame()
+    if not inGame then return end
+
+    for _, object in ipairs(inGame:GetChildren()) do
+        for key, label in pairs(OTHER_ESP) do
+            if object.Name:lower():find(key:lower(), 1, true) then
+                targets[object] = {
+                    Color = Color3.fromRGB(255, 255, 255),
+                    TextFunc = function() return label end,
+                }
+                break
+            end
+        end
+    end
+end
+
+local function updateESP()
+    if destroyed then return end
+
+    local records = ESP.Records
+    local targets = {}
+
+    if Config.ESP then
+        addHumanoids(targets, getKillerFolder(), Config.ESPKillers, Config.ESPColorKiller)
+        addHumanoids(targets, getSurvivorsFolder(), Config.ESPSurvivors, Config.ESPColorSurvivor)
+        addGlobalHumanoids(targets)
+        addGenerators(targets)
+        addItems(targets)
+        addOther(targets)
+    end
+
+    for instance, info in pairs(targets) do
+        local record = records[instance]
+        if not record then
+            record = createESPRecord(instance, info.Color, info.TextFunc)
+            records[instance] = record
+        end
+
+        if record then
+            record.Color = info.Color
+            record.TextFunc = info.TextFunc
+            if not updateESPRecord(record) then
+                destroyESPRecord(record)
+                records[instance] = nil
+            end
+        end
+    end
+
+    for instance, record in pairs(records) do
+        if not targets[instance] then
+            destroyESPRecord(record)
+            records[instance] = nil
+        end
+    end
+end
+
+local function clearESP()
+    for instance, record in pairs(ESP.Records) do
+        destroyESPRecord(record)
+        ESP.Records[instance] = nil
+    end
+end
+
+------------------------------------------------------------------------
+-- Punch Aim：点击 Punch 自动转向最近的杀手（可选锁摄像机）
+------------------------------------------------------------------------
+
+local aimTarget = nil
+local aimEndTime = 0
+local aimPrevCamType = nil
+local aimPrevAutoRotate = nil
+
+local function getClosestKillerInRange(maxDistance)
+    local myCharacter = LocalPlayer.Character
+    local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local best, bestDistance = nil, maxDistance or 30
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+        if model and model.Parent and model ~= myCharacter then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            local root = targetRoot(model)
+            if humanoid and humanoid.Health > 0 and root then
+                local distance = (root.Position - myRoot.Position).Magnitude
+                if distance <= bestDistance then
+                    best, bestDistance = model, distance
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+local function restoreAimState()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid and aimPrevAutoRotate ~= nil then
+        pcall(function() humanoid.AutoRotate = true end)
+    end
+    aimPrevAutoRotate = nil
+
+    local camera = Workspace.CurrentCamera
+    if camera and aimPrevCamType ~= nil and camera.CameraType == Enum.CameraType.Scriptable then
+        pcall(function() camera.CameraType = aimPrevCamType end)
+    end
+    aimPrevCamType = nil
+end
+
+local function faceNow(killer)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not (root and humanoid) then return end
+
+    local killerRoot = targetRoot(killer)
+    if not killerRoot then return end
+
+    if aimPrevAutoRotate == nil then
+        aimPrevAutoRotate = humanoid.AutoRotate
+    end
+    if humanoid.AutoRotate then
+        pcall(function() humanoid.AutoRotate = false end)
+    end
+
+    local velocity = killerRoot.AssemblyLinearVelocity
+    if typeof(velocity) ~= "Vector3" then velocity = Vector3.new() end
+    local aimPosition = killerRoot.Position + velocity * 0.1
+    local myPosition = root.Position
+    local flat = Vector3.new(aimPosition.X, myPosition.Y, aimPosition.Z)
+
+    if (flat - myPosition).Magnitude > 0.05 then
+        root.CFrame = CFrame.lookAt(myPosition, flat)
+    end
+end
+
+local function startAim(killer, duration)
+    if not killer or not killer.Parent then return end
+    aimTarget = killer
+    aimEndTime = os.clock() + (duration or Config.PunchAimDuration or 0.75)
+    faceNow(killer)
+end
+
+local AIM_LEAD = 0.1
+
+local function punchAimTick()
+    if not Config.PunchAim then
+        if aimPrevAutoRotate ~= nil or aimPrevCamType ~= nil then
+            restoreAimState()
+        end
+        return
+    end
+
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not (root and humanoid) or os.clock() > aimEndTime then
+        if aimPrevAutoRotate ~= nil or aimPrevCamType ~= nil then
+            restoreAimState()
+        end
+        return
+    end
+
+    local target = aimTarget
+    if not target or not target.Parent then
+        if aimPrevAutoRotate ~= nil or aimPrevCamType ~= nil then
+            restoreAimState()
+        end
+        return
+    end
+
+    local killerRoot = targetRoot(target)
+    if not killerRoot then return end
+
+    if aimPrevAutoRotate == nil then
+        aimPrevAutoRotate = humanoid.AutoRotate
+    end
+    if humanoid.AutoRotate then
+        pcall(function() humanoid.AutoRotate = false end)
+    end
+
+    local velocity = killerRoot.AssemblyLinearVelocity
+    if typeof(velocity) ~= "Vector3" then velocity = Vector3.new() end
+    local aimPosition = killerRoot.Position + velocity * AIM_LEAD
+    local myPosition = root.Position
+    local flat = Vector3.new(aimPosition.X, myPosition.Y, aimPosition.Z)
+    local distance = (flat - myPosition).Magnitude
+
+    if distance > 0.05 then
+        local want = CFrame.lookAt(myPosition, flat)
+        if distance < 8 then
+            root.CFrame = want
+        else
+            root.CFrame = root.CFrame:Lerp(want, 0.65)
+        end
+    end
+
+    local camera = Workspace.CurrentCamera
+    if camera and Config.AimCamLock then
+        if aimPrevCamType == nil then
+            aimPrevCamType = camera.CameraType
+        end
+        if camera.CameraType ~= Enum.CameraType.Scriptable then
+            pcall(function() camera.CameraType = Enum.CameraType.Scriptable end)
+        end
+        local direction = flat - myPosition
+        if direction.Magnitude > 0.1 then
+            local unit = Vector3.new(direction.X, 0, direction.Z).Unit
+            local currentOffset = camera.CFrame.Position - myPosition
+            local camDistance = math.clamp(currentOffset.Magnitude, 6, 30)
+            local camHeight = math.clamp(currentOffset.Y, 1, 8)
+            local camPosition = myPosition + Vector3.new(0, camHeight + 1.5, 0) - unit * camDistance
+            local lookPoint = killerRoot.Position + Vector3.new(0, 1.5, 0)
+            camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(camPosition, lookPoint), 0.6)
+        end
+    elseif camera and aimPrevCamType ~= nil then
+        pcall(function() camera.CameraType = aimPrevCamType end)
+        aimPrevCamType = nil
+    end
+end
+
+local function aimOnce()
+    if not Config.PunchAim then return end
+    local killer = getClosestKillerInRange(Config.PunchAimRange)
+    if killer then
+        startAim(killer, Config.PunchAimDuration)
+    end
+end
+
+local AIM_KEY_NAMES = {
+    E = true,
+    Q = true,
+    F = true,
+    R = true,
+    One = true,
+    Two = true,
+    Three = true,
+    Four = true,
+}
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if destroyed or gameProcessed or not Config.PunchAim then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if input.KeyCode.Name == Config.ToggleKey then return end
+    if AIM_KEY_NAMES[input.KeyCode.Name] then
+        aimOnce()
+    end
+end)
+
+local function firePunchAbility()
+    local button = getAbilityButton("Punch")
+    if FireSignal and button then
+        local ok = pcall(function()
+            FireSignal(button.MouseButton1Down)
+            FireSignal(button.MouseButton1Click)
+        end)
+        if ok then return true end
+    end
+
+    local remote = ensureBlockRemote()
+    if not remote then return false end
+
+    local ok = pcall(function()
+        remote:FireServer("UseActorAbility", "Punch")
+        remote:FireServer("UseActorAbility", { "Punch" })
+    end)
+    return ok
+end
+
+local function isPunchReady()
+    local button = getAbilityButton("Punch")
+    if not button then return false end
+    local charges = button:FindFirstChild("Charges")
+    if charges then
+        return tostring(charges.Text) == "1"
+    end
+    return button.Active ~= false
+end
+
+local function doAutoPunch()
+    if not Config.AutoPunch then return end
+    local killer = getClosestKillerInRange(Config.AutoPunchRange)
+    if not killer then return end
+    if Config.PunchAim then
+        startAim(killer, Config.PunchAimDuration)
+    end
+    task.wait(0.03)
+    firePunchAbility()
+end
+
+local lastPunchReady = false
+local punchCooldown = 0
+
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.05)
+
+        if Config.AutoPunch then
+            local ready = isPunchReady()
+            if ready and not lastPunchReady and os.clock() >= punchCooldown then
+                local killer = getClosestKillerInRange(Config.AutoPunchRange)
+                if killer then
+                    punchCooldown = os.clock() + 0.35
+                    task.spawn(doAutoPunch)
+                    lastPunchReady = true
+                end
+            else
+                lastPunchReady = ready
+            end
+        else
+            lastPunchReady = false
+        end
+    end
+end)
+
+task.spawn(function()
+    while not destroyed do
+        local punchButton = getAbilityButton("Punch")
+        if punchButton and not punchButton:GetAttribute("TURN_v1_AimBound") then
+            punchButton:SetAttribute("TURN_v1_AimBound", true)
+            pcall(function()
+                punchButton.MouseButton1Down:Connect(aimOnce)
+                punchButton.MouseButton1Click:Connect(aimOnce)
+            end)
+        end
+        task.wait(1)
+    end
+end)
+
+------------------------------------------------------------------------
+-- HDT：实时监测本地动画 ID，命中就冲脸
+------------------------------------------------------------------------
+
+local HDT_BLOCK_ANIM_IDS = {
+    ["86551890639162"] = true,
+    ["111056888239218"] = true,
+    ["95383833479364"] = true,
+    ["86527493842168"] = true,
+    ["104904234520233"] = true,
+    ["106071738324081"] = true,
+    ["81352929123131"] = true,
+    ["96431411613186"] = true,
+    ["123500898537074"] = true,
+    ["87965811631337"] = true,
+    ["75613466344402"] = true,
+}
+
+local function isHDTBlockAnim(id)
+    return id ~= nil and HDT_BLOCK_ANIM_IDS[id] == true
+end
+
+local function nearestHDTKiller(range)
+    local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local best, bestDistance = nil, range or Config.SmartBlockRange
+
+    for _, candidate in ipairs(getCandidates()) do
+        local model = candidate.Model
+        if model and model.Parent and model ~= LocalPlayer.Character then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            local root = targetRoot(model)
+            if humanoid and humanoid.Health > 0 and root then
+                local distance = (root.Position - myRoot.Position).Magnitude
+                if distance < bestDistance then
+                    best, bestDistance = model, distance
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+local hdtActive = false
+local hdtTarget = nil
+local hdtUntil = 0
+local hdtConn = nil
+local hdtBv = nil
+local hdtSaved = nil
+
+local function stopHDT()
+    if hdtConn then
+        pcall(function() hdtConn:Disconnect() end)
+        hdtConn = nil
+    end
+    if hdtBv then
+        pcall(function() hdtBv:Destroy() end)
+        hdtBv = nil
+    end
+    if hdtSaved then
+        local character = LocalPlayer.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function()
+                humanoid.WalkSpeed = hdtSaved.walk
+                humanoid.JumpPower = hdtSaved.jump
+                humanoid.AutoRotate = true
+            end)
+        end
+        hdtSaved = nil
+    end
+    hdtActive = false
+    hdtTarget = nil
+end
+
+local function beginHDT(target)
+    if hdtActive or not target or not target.Parent then return end
+
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local targetPart = target:FindFirstChild("HumanoidRootPart")
+        or target:FindFirstChild("QueryHitbox")
+    if not (root and humanoid and targetPart) then return end
+
+    hdtActive = true
+    hdtTarget = target
+
+    local duration = Config.SmartBlockHold or 1.5
+    hdtUntil = os.clock() + duration
+    hdtSaved = {
+        walk = humanoid.WalkSpeed,
+        jump = humanoid.JumpPower,
+    }
+
+    humanoid.WalkSpeed = 0
+    humanoid.JumpPower = 0
+    humanoid.AutoRotate = false
+
+    local bodyVelocity = Instance.new("BodyVelocity")
+    bodyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bodyVelocity.Velocity = Vector3.new()
+    bodyVelocity.Parent = root
+    hdtBv = bodyVelocity
+
+    local startY = root.Position.Y
+    local started = os.clock()
+
+    hdtConn = RunService.RenderStepped:Connect(function()
+        if not hdtActive then return end
+
+        local ok = pcall(function()
+            local currentCharacter = LocalPlayer.Character
+            local currentRoot = currentCharacter and currentCharacter:FindFirstChild("HumanoidRootPart")
+            if not currentRoot then stopHDT() return end
+
+            local currentTarget = target.Parent
+                and (target:FindFirstChild("HumanoidRootPart") or target:FindFirstChild("QueryHitbox"))
+            if not currentTarget then stopHDT() return end
+            if os.clock() > hdtUntil then stopHDT() return end
+
+            local myPosition = currentRoot.Position
+            local targetPosition = currentTarget.Position
+            local toTarget = Vector3.new(
+                targetPosition.X - myPosition.X,
+                0,
+                targetPosition.Z - myPosition.Z
+            )
+            local distance = toTarget.Magnitude
+            if distance <= 1.5 then
+                stopHDT()
+                return
+            end
+
+            local direction = toTarget.Unit
+            local baseSpeed = math.max(tonumber(Config.SmartBlockDash) or 8, 6)
+            local elapsed = os.clock() - started
+            local speed = baseSpeed * (0.5 + 0.5 * math.clamp(elapsed / 0.15, 0, 1))
+            if distance < 8 then
+                speed = speed * math.clamp((distance - 1.5) / 6.5, 0.3, 1)
+            end
+
+            if hdtBv and hdtBv.Parent then
+                hdtBv.Velocity = Vector3.new(direction.X * speed, 0, direction.Z * speed)
+            end
+
+            currentRoot.CFrame = CFrame.lookAt(myPosition,
+                Vector3.new(targetPosition.X, myPosition.Y, targetPosition.Z))
+
+            local verticalDistance = math.abs(currentRoot.Position.Y - startY)
+            if verticalDistance > 1.5 then
+                local rotation = currentRoot.CFrame - currentRoot.CFrame.Position
+                currentRoot.CFrame = CFrame.new(currentRoot.Position.X, startY, currentRoot.Position.Z)
+                    * rotation
+            end
+        end)
+
+        if not ok then stopHDT() end
+    end)
+
+    task.delay(duration + 0.2, function()
+        if hdtActive then stopHDT() end
+    end)
+end
+
+-- 实时监测本地角色正在播放的动画（不再依赖按钮/有效格挡）
+local hdtTrackAt = setmetatable({}, { __mode = "k" })
+
+local function scanHDTAnimations()
+    if destroyed or not Config.SmartBlock or hdtActive then return end
+
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+    if not animator then return end
+
+    local ok, tracks = pcall(function()
+        return animator:GetPlayingAnimationTracks()
+    end)
+    if not ok or type(tracks) ~= "table" then return end
+
+    local now = os.clock()
+
+    for _, track in ipairs(tracks) do
+        local animation = track.Animation
+        local id, name
+        pcall(function()
+            id = animation and tostring(animation.AnimationId):match("%d+")
+            name = animation and tostring(animation.Name) or ""
+        end)
+
+        if isHDTBlockAnim(id) then
+            local last = hdtTrackAt[track]
+            if not last or now - last >= 2 then
+                hdtTrackAt[track] = now
+                local killer = nearestHDTKiller(Config.SmartBlockRange)
+                if killer then
+                    beginHDT(killer)
+                end
+                break
+            end
+        end
+    end
+end
+
+local hdtScanConn = RunService.RenderStepped:Connect(function()
+    if destroyed then return end
+    pcall(scanHDTAnimations)
+end)
+
+-- 空闲时恢复 AutoRotate（和 Punch Aim 不打架）
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.5)
+        pcall(function()
+            if hdtActive then return end
+            if aimTarget and os.clock() <= aimEndTime then return end
+            local character = LocalPlayer.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.AutoRotate == false then
+                humanoid.AutoRotate = true
+            end
+        end)
+    end
+end)
+
+------------------------------------------------------------------------
+-- FPS + Ping
+------------------------------------------------------------------------
+
+local FPS = {
+    enabled = false,
+    gui = nil,
+    label = nil,
+    frames = 0,
+    elapsed = 0,
+    conn = nil,
+}
+
+local function buildFPSGui()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return end
+
+    local old = playerGui:FindFirstChild("TURN_v1_FPSPing")
+    if old then old:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "TURN_v1_FPSPing"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999998
+    gui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.AnchorPoint = Vector2.new(1, 0)
+    frame.Position = UDim2.new(1, -2, 0, -1)
+    frame.Size = UDim2.new(0, 126, 0, 22)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 30, 20)
+    frame.BackgroundTransparency = 0.15
+    frame.BorderSizePixel = 0
+    frame.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = frame
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -4, 1, 0)
+    label.Position = UDim2.new(0, 2, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 11
+    label.TextColor3 = Color3.fromRGB(80, 255, 130)
+    label.Text = "FPS: -- | PING: -- ms"
+    label.Parent = frame
+
+    FPS.gui = gui
+    FPS.label = label
+end
+
+local function setFPSPing(value)
+    if value then
+        FPS.enabled = true
+        if not FPS.gui then buildFPSGui() end
+        if FPS.gui then FPS.gui.Enabled = true end
+        FPS.frames, FPS.elapsed = 0, 0
+
+        if not FPS.conn then
+            FPS.conn = RunService.RenderStepped:Connect(function(dt)
+                if not FPS.enabled then return end
+                FPS.frames = FPS.frames + 1
+                FPS.elapsed = FPS.elapsed + dt
+                if FPS.elapsed >= 1 then
+                    local fps = math.floor(FPS.frames / FPS.elapsed + 0.5)
+                    FPS.frames, FPS.elapsed = 0, 0
+                    local ping = "--"
+                    pcall(function()
+                        local network = Stats:FindFirstChild("Network")
+                        local serverStats = network and network:FindFirstChild("ServerStatsItem")
+                        local dataPing = serverStats and serverStats:FindFirstChild("Data Ping")
+                        if dataPing then ping = math.floor(dataPing:GetValue() + 0.5) end
+                    end)
+                    if FPS.label then
+                        FPS.label.Text = "FPS: " .. fps .. " | PING: " .. ping .. " ms"
+                    end
+                end
+            end)
+        end
+    else
+        FPS.enabled = false
+        if FPS.conn then
+            pcall(function() FPS.conn:Disconnect() end)
+            FPS.conn = nil
+        end
+        if FPS.gui then FPS.gui.Enabled = false end
+    end
+end
+
+------------------------------------------------------------------------
+-- FOV / 聊天 / 设备伪装
+------------------------------------------------------------------------
+
+local function applyDeviceSpoof()
+    local device = Config.DeviceSpoof
+    if device == "Original" then
+        local map = {
+            Keyboard = "PC",
+            MouseButton1 = "PC",
+            MouseButton2 = "PC",
+            MouseMovement = "PC",
+            Touch = "Mobile",
+            Gamepad1 = "Console",
+        }
+        device = map[UserInputService:GetLastInputType().Name] or "PC"
+    elseif device == "Nothing" then
+        device = nil
+    end
+
+    local remote = ensureBlockRemote()
+    if not remote then return false end
+
+    local ok1 = pcall(function() remote:FireServer("SetDevice", { device }) end)
+    local ok2 = pcall(function() remote:FireServer("SetDevice", device) end)
+    return ok1 or ok2
+end
+
+task.spawn(function()
+    task.wait(4)
+    if destroyed then return end
+    if Config.DeviceSpoof ~= "Original" then
+        pcall(applyDeviceSpoof)
+    end
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(2)
+        if not destroyed and Config.DeviceSpoof ~= "Original" then
+            pcall(applyDeviceSpoof)
+        end
+    end)
+end)
+
+task.spawn(function()
+    while not destroyed do
+        if Config.FOV ~= 70 then
+            local camera = Workspace.CurrentCamera
+            if camera and camera.FieldOfView ~= Config.FOV then
+                camera.FieldOfView = Config.FOV
+            end
+            local playerData = LocalPlayer:FindFirstChild("PlayerData")
+            local fovValue = playerData and (playerData:FindFirstChild("FieldOfView", true)
+                or playerData:FindFirstChild("FOV", true))
+            if fovValue and fovValue.Value ~= Config.FOV then
+                pcall(function() fovValue.Value = Config.FOV end)
+            end
+        end
+
+        if Config.ShowChat then
+            local config = TextChatService:FindFirstChildOfClass("ChatWindowConfiguration")
+            if config then config.Enabled = true end
+        end
+
+        task.wait(0.25)
+    end
+end)
+
+------------------------------------------------------------------------
+-- 自动发电机（只在 PuzzleUI 打开时工作）
+------------------------------------------------------------------------
+
+local IsFixingGenerator = false
+local GenLastEnd = -math.huge
+local GEN_END_COOLDOWN = 2
+
+local function isPlayersNear(distance)
+    local character = LocalPlayer.Character
+    local myRoot = character and character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return false end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local root = player.Character:FindFirstChild("HumanoidRootPart")
+            if root and (root.Position - myRoot.Position).Magnitude < distance then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function puzzleOpen()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    return (playerGui and playerGui:FindFirstChild("PuzzleUI")) ~= nil
+end
+
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.2)
+        pcall(function()
+            if not Config.GenEnabled or IsFixingGenerator then return end
+            if os.clock() - GenLastEnd < GEN_END_COOLDOWN then return end
+            if not puzzleOpen() then return end
+
+            local character = LocalPlayer.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            local gameMap = getGameMap()
+            if not (root and gameMap) then return end
+
+            for _, generator in ipairs(gameMap:GetChildren()) do
+                if generator:IsA("Model") and generator.Name == "Generator"
+                    and generator:FindFirstChild("Main") then
+                    if (generator.Main.Position - root.Position).Magnitude < 6.7 then
+                        IsFixingGenerator = true
+                        task.spawn(function()
+                            pcall(function()
+                                local remotes = generator:FindFirstChild("Remotes")
+                                local progress = generator:FindFirstChild("Progress")
+                                local remoteEvent = remotes and remotes:FindFirstChildOfClass("RemoteEvent")
+                                if not (remoteEvent and progress) then return end
+
+                                local lastProgress = progress.Value
+                                local stalled = 0
+
+                                while Config.GenEnabled
+                                    and generator.Parent
+                                    and progress.Value < 100
+                                    and puzzleOpen() do
+                                    local base = (not isPlayersNear(32) and Config.GenSpeedUp and 1.5)
+                                        or Config.GenCooldown
+                                    task.wait(base + (math.random() * 0.2 - 0.1))
+
+                                    if not Config.GenEnabled or not generator.Parent then break end
+                                    if progress.Value >= 100 then break end
+                                    if not puzzleOpen() then break end
+
+                                    pcall(function() remoteEvent:FireServer() end)
+
+                                    if progress.Value > lastProgress then
+                                        lastProgress = progress.Value
+                                        stalled = 0
+                                    else
+                                        stalled = stalled + 1
+                                        if stalled >= 8 then break end
+                                    end
+                                end
+                            end)
+                            GenLastEnd = os.clock()
+                            IsFixingGenerator = false
+                        end)
+                        break
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+task.spawn(function()
+    if type(hookfunction) ~= "function" then return end
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local killers = assets and assets:FindFirstChild("Killers")
+    local azure = killers and (killers:FindFirstChild("Azure") or killers:FindFirstChild("!Azure"))
+    local qteModule = azure and azure:FindFirstChild("cl_ConstructQTE", true)
+    if not qteModule then return end
+
+    local ok, module = pcall(require, qteModule)
+    if not ok or type(module) ~= "table" or type(module.new) ~= "function" then return end
+
+    local originalNew
+    originalNew = hookfunction(module.new, function(self, ...)
+        local instance = originalNew(self, ...)
+        task.delay(0.05, function()
+            if destroyed then return end
+            if Config.GenDisarm and type(instance) == "table"
+                and type(instance.AddProgress) == "function" then
+                pcall(function() instance:AddProgress(100) end)
+            end
+        end)
+        return instance
+    end)
+end)
+
+------------------------------------------------------------------------
+-- John Doe
+------------------------------------------------------------------------
+
+local function applyJohnDoeFixes()
+    local inGame = getInGame()
+    if not inGame then return end
+
+    for _, child in ipairs(inGame:GetChildren()) do
+        if Config.JDTrails and child.Name:find("JohnDoeTrail") then
+            for _, part in ipairs(child:GetChildren()) do
+                if part:IsA("BasePart") then part.CanTouch = false end
+            end
+        end
+        if Config.JDFootprints and child.Name:find("Shadows") then
+            for _, part in ipairs(child:GetChildren()) do
+                if part:IsA("BasePart") then part.CanTouch = false end
+            end
+        end
+        if Config.JDSpikes and child.Name == "SpikeCollision" and child:IsA("BasePart") then
+            child.Size = Vector3.new(11, 3.5, 3.5)
+            child.Shape = Enum.PartType.Cylinder
+        end
+    end
+end
+
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.5)
+        if Config.JDTrails or Config.JDFootprints or Config.JDSpikes then
+            pcall(applyJohnDoeFixes)
+        end
+    end
+end)
+
+------------------------------------------------------------------------
+-- 体力
+------------------------------------------------------------------------
+
+local SprintModule = nil
+
+task.spawn(function()
+    local ok, module = pcall(function()
+        return require(ReplicatedStorage:WaitForChild("Systems", 5)
+            :WaitForChild("Character", 5)
+            :WaitForChild("Game", 5)
+            :WaitForChild("Sprinting", 5))
+    end)
+    if ok and module then
+        SprintModule = module
+    end
+end)
+
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.5)
+        if SprintModule and Config.StamPreset ~= "Original" then
+            pcall(function()
+                if Config.StamPreset == "Infinite" then
+                    rawset(SprintModule, "Stamina", SprintModule.MaxStamina or math.huge)
+                elseif SprintModule.Stamina and SprintModule.MaxStamina
+                    and SprintModule.Stamina < SprintModule.MaxStamina * 0.8 then
+                    local rate = Config.StamPreset == "Semi-Realistic" and 0.005 or 0.0025
+                    rawset(SprintModule, "Stamina",
+                        math.min(SprintModule.Stamina + SprintModule.MaxStamina * rate,
+                            SprintModule.MaxStamina))
+                end
+            end)
+        end
+    end
+end)
+
+------------------------------------------------------------------------
+-- Noli
+------------------------------------------------------------------------
+
+task.spawn(function()
+    while not destroyed do
+        task.wait(0.5)
+        pcall(function()
+            if Config.NoliNPC then
+                local playersFolder = Workspace:FindFirstChild("Players")
+                local killersFolder = playersFolder and playersFolder:FindFirstChild("Killers")
+                if killersFolder then
+                    for _, killer in ipairs(killersFolder:GetChildren()) do
+                        if killer.Name:lower() == "noli" and not Players:GetPlayerFromCharacter(killer) then
+                            killer.Parent = Lighting
+                            pcall(function()
+                                killer:PivotTo(killer:GetPivot() * CFrame.new(0, -100, 0))
+                            end)
+                        end
+                    end
+                end
+                local themes = Workspace:FindFirstChild("Themes")
+                if themes then
+                    for _, sound in ipairs(themes:GetChildren()) do
+                        if sound:IsA("Sound") and sound.Name:find("FakeLayer") then
+                            sound:Destroy()
+                        end
+                    end
+                end
+            end
+
+            if Config.NoliTimer then
+                local timer = ReplicatedStorage:FindFirstChild("RoundTimer")
+                if timer then
+                    local timeLeft = timer:GetAttribute("TimeLeft")
+                    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+                    local roundTimer = playerGui and playerGui:FindFirstChild("RoundTimer")
+                    local ui = roundTimer and roundTimer:FindFirstChild("Time", true)
+                    if timeLeft and ui then
+                        pcall(function()
+                            ui.Text = string.format("%d:%02d",
+                                math.floor(timeLeft / 60), math.floor(timeLeft % 60))
+                        end)
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+------------------------------------------------------------------------
+-- 窗口
+------------------------------------------------------------------------
+
+WindUI.TransparencyValue = 0.3
+
+local okWindow, Window = pcall(function()
+    return WindUI:CreateWindow({
+        Title      = "TURNopensource",
+        Author     = AUTHOR,
+        Icon       = "shield-bold",
+        Size       = UDim2.fromOffset(620, 620),
+        MinSize    = Vector2.new(460, 420),
+        MaxSize    = Vector2.new(820, 760),
+        SideBarWidth = 160,
+        Transparent = true,
+        ToggleKey  = Enum.KeyCode.RightShift,
+        Topbar     = {
+            Height = 44,
+            ButtonsType = "Mac",
+        },
+        OpenButton = {
+            Title        = "TURNopensource",
+            CornerRadius = UDim.new(1, 0),
+            StrokeThickness = 2,
+            Scale        = 0.55,
+            Draggable    = true,
+            OnlyMobile   = false,
+            Color        = ColorSequence.new(
+                Color3.fromHex("#FFFFFF"),
+                Color3.fromHex("#CFE3F5")
+            ),
+        },
+    })
+end)
+
+if not okWindow or not Window then
+    showBootError("WindUI 窗口创建失败：\n" .. tostring(Window))
+    return
+end
+
+local statusTag
+pcall(function()
+    statusTag = Window:Tag({
+        Title = "18 studs · 0 in range",
+        Icon  = "shield-bold",
+        Color = Color3.fromHex("#F4F8FD"),
+        Border = true,
+    })
+end)
+
+local okTab, Tab = pcall(function()
+    return Window:Tab({
+        Title = "Auto block",
+        Icon  = "shield-bold",
+    })
+end)
+
+if not okTab or not Tab then
+    showBootError("创建 Tab「Auto block」失败：\n" .. tostring(Tab))
+    return
+end
+
+local inRange = 0
+local uiErrors = {}
+
+local function build(fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        table.insert(uiErrors, tostring(err))
+        warnf("UI 元素创建失败: %s", tostring(err))
+    end
+    return ok
+end
+
+local function notify(title, content)
+    pcall(function()
+        WindUI:Notify({
+            Title    = title,
+            Content  = content,
+            Duration = 3,
+        })
+    end)
+end
+
+------------------------------------------------------------------------
+-- Auto block 页
+------------------------------------------------------------------------
+
+local autoToggle
+local showToggle
+
+build(function()
+    Tab:Section({ Title = "MAIN" })
+end)
+
+build(function()
+    autoToggle = Tab:Toggle({
+        Title = "自动格挡",
+        Desc  = "音效 / 动画命中，且你进入杀手白圈时格挡",
+        Value = Config.AutoBlock,
+        Callback = function(value)
+            Config.AutoBlock = value
+            setRingsArmed(value)
+
+            if value then
+                setRingsVisible(true)
+                if showToggle then showToggle:Set(true) end
+            end
+
+            notify(SCRIPT_NAME, value
+                and ("自动格挡已开启 · 半径 " .. math.floor(Config.Radius + 0.5) .. " studs")
+                or "自动格挡已关闭")
+        end,
+    })
+end)
+
+build(function()
+    Tab:Keybind({
+        Title = "开关快捷键",
+        Desc  = "按下后切换自动格挡",
+        Value = Config.ToggleKey,
+        Callback = function(key)
+            if type(key) == "string" and key ~= "" then
+                Config.ToggleKey = key
+            end
+            if autoToggle then
+                autoToggle:Set(not Config.AutoBlock)
+            end
+        end,
+    })
+end)
+
+build(function()
+    Tab:Section({ Title = "RANGE" })
+end)
+
+build(function()
+    Tab:Slider({
+        Title = "格挡半径",
+        Desc  = "studs · 杀手脚下的白圈半径",
+        Value = { Min = 6, Max = 48, Default = Config.Radius },
+        Step  = 1,
+        Callback = function(value)
+            Config.Radius = value
+            setRingsRadius(value)
+        end,
+    })
+end)
+
+build(function()
+    showToggle = Tab:Toggle({
+        Title = "显示范围圈",
+        Desc  = "白色玻璃圆环 · 贴在杀手脚下",
+        Value = Config.ShowCircle,
+        Callback = function(value)
+            Config.ShowCircle = value
+            setRingsVisible(value)
+        end,
+    })
+end)
+
+build(function()
+    Tab:Slider({
+        Title = "玻璃填充",
+        Desc  = "数值越高越通透",
+        Value = { Min = 0.55, Max = 0.97, Default = Config.CircleTransparency },
+        Step  = 0.01,
+        Callback = function(value)
+            Config.CircleTransparency = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "呼吸效果",
+        Desc  = "白圈轻微脉冲；你进入圈内时更快",
+        Value = Config.Pulse,
+        Callback = function(value)
+            Config.Pulse = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Section({ Title = "FACING" })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "面向检测",
+        Desc  = "只挡正在面朝你的杀手",
+        Value = Config.FaceCheck,
+        Callback = function(value)
+            Config.FaceCheck = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Slider({
+        Title = "面向角度",
+        Desc  = "检测范围和扇形共用这个角度",
+        Value = { Min = 20, Max = 180, Default = Config.FaceAngle },
+        Step  = 5,
+        Callback = function(value)
+            Config.FaceAngle = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Slider({
+        Title = "面向距离",
+        Desc  = "扇形长度",
+        Value = { Min = 4, Max = 60, Default = Config.FaceDist },
+        Step  = 1,
+        Callback = function(value)
+            Config.FaceDist = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "面向扇形可视化",
+        Desc  = "在杀手脚下画出面向扇形，和检测完全一致",
+        Value = Config.FaceVisual,
+        Callback = function(value)
+            Config.FaceVisual = value
+            syncFaceCones()
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "墙体检测",
+        Desc  = "中间有墙时不格挡",
+        Value = Config.WallCheck,
+        Callback = function(value)
+            Config.WallCheck = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Section({ Title = "DETECT" })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "音效格挡",
+        Desc  = "白名单音效 ID 命中 · 白圈内才触发",
+        Value = Config.SoundBlock,
+        Callback = function(value)
+            Config.SoundBlock = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "动画格挡",
+        Desc  = "白名单动画命中 · 白圈内才触发",
+        Value = Config.AnimBlock,
+        Callback = function(value)
+            Config.AnimBlock = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "冷却校验",
+        Desc  = "关闭更稳：冷却中发包无副作用",
+        Value = Config.BlockReadyCheck,
+        Callback = function(value)
+            Config.BlockReadyCheck = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Toggle({
+        Title = "调试日志",
+        Desc  = "控制台输出触发来源与距离",
+        Value = Config.BlockDebug,
+        Callback = function(value)
+            Config.BlockDebug = value
+        end,
+    })
+end)
+
+build(function()
+    Tab:Button({
+        Title = "测试格挡",
+        Callback = function()
+            local ok = fireBlockAbility()
+            notify("测试格挡", ok and "已发送 Block" or "发送失败：按钮和远端都没找到")
+        end,
+    })
+end)
+
+build(function()
+    Tab:Paragraph({
+        Title = "音效 22 个 ID · 动画 12 个名称\n只对白圈内的目标触发格挡",
+        TextSize = 15,
+    })
+end)
+
+build(function()
+    Tab:Slider({
+        Title = "窗口透明度",
+        Desc  = "UI 背景透明程度",
+        Value = { Min = 0, Max = 0.8, Default = 0.3 },
+        Step  = 0.1,
+        Callback = function(value)
+            pcall(function()
+                Window:SetBackgroundTransparency(value)
+            end)
+        end,
+    })
+end)
+
+build(function()
+    Tab:Button({
+        Title = "扫描范围内目标",
+        Callback = function()
+            local targets = getTargetsInRange(Config.Radius)
+
+            if #targets == 0 then
+                notify("范围扫描", "白圈内没有存活目标")
+                return
+            end
+
+            local names = {}
+            for i = 1, math.min(#targets, 3) do
+                local target = targets[i]
+                names[#names + 1] = string.format("%s (%d)",
+                    target.Name, math.floor(target.Distance + 0.5))
+            end
+
+            notify("范围扫描", string.format(
+                "%d 个目标 · %s%s",
+                #targets,
+                table.concat(names, ", "),
+                #targets > 3 and " ..." or ""
+            ))
+        end,
+    })
+end)
+
+build(function()
+    Tab:Paragraph({
+        Title = "范围为主：你进入杀手脚下的白圈时才会格挡。\n"
+            .. "TURNopensource · " .. AUTHOR,
+        TextSize = 16,
+    })
+end)
+
+------------------------------------------------------------------------
+-- ESP 页
+------------------------------------------------------------------------
+
+local okESPTab, ESPTab = pcall(function()
+    return Window:Tab({ Title = "ESP", Icon = "eye-bold" })
+end)
+
+if okESPTab and ESPTab then
+    build(function()
+        ESPTab:Section({ Title = "PLAYERS" })
+    end)
+
+    local espMasterToggle
+
+    build(function()
+        espMasterToggle = ESPTab:Toggle({
+            Title = "启用 ESP",
+            Desc  = "Highlight + 头顶名字",
+            Value = Config.ESP,
+            Callback = function(value)
+                Config.ESP = value
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "杀手 ESP",
+            Desc  = "workspace.Players.Killers",
+            Value = Config.ESPKillers,
+            Callback = function(value)
+                Config.ESPKillers = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Colorpicker({
+            Title = "杀手颜色",
+            Default = Config.ESPColorKiller,
+            Callback = function(color)
+                Config.ESPColorKiller = color
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "幸存者 ESP",
+            Desc  = "workspace.Players.Survivors",
+            Value = Config.ESPSurvivors,
+            Callback = function(value)
+                Config.ESPSurvivors = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Colorpicker({
+            Title = "幸存者颜色",
+            Default = Config.ESPColorSurvivor,
+            Callback = function(color)
+                Config.ESPColorSurvivor = color
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "显示名字",
+            Desc  = "头顶 Billboard 名字 / HP",
+            Value = Config.ESPShowName,
+            Callback = function(value)
+                Config.ESPShowName = value
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "显示距离",
+            Desc  = "名字后面追加距离",
+            Value = Config.ESPShowDistance,
+            Callback = function(value)
+                Config.ESPShowDistance = value
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Section({ Title = "OBJECTS" })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "发电机 ESP",
+            Desc  = "显示发电机进度 %",
+            Value = Config.ESPGenerators,
+            Callback = function(value)
+                Config.ESPGenerators = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Colorpicker({
+            Title = "发电机颜色",
+            Default = Config.ESPColorGenerator,
+            Callback = function(color)
+                Config.ESPColorGenerator = color
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "物品 ESP",
+            Desc  = "地面 / 容器里的 Tool",
+            Value = Config.ESPItems,
+            Callback = function(value)
+                Config.ESPItems = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "其他实体 ESP",
+            Desc  = "藤蔓 / 灯泡 / 地雷 / 建造机 / 哨兵",
+            Value = Config.ESPOther,
+            Callback = function(value)
+                Config.ESPOther = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Section({ Title = "GLOBAL" })
+    end)
+
+    build(function()
+        ESPTab:Toggle({
+            Title = "全实体高亮",
+            Desc  = "所有角色 + 发电机 + 物品",
+            Value = Config.ESPGlobal,
+            Callback = function(value)
+                Config.ESPGlobal = value
+                if value and not Config.ESP and espMasterToggle then
+                    espMasterToggle:Set(true)
+                end
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Colorpicker({
+            Title = "全实体颜色",
+            Default = Config.ESPColorGlobal,
+            Callback = function(color)
+                Config.ESPColorGlobal = color
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Slider({
+            Title = "ESP 距离",
+            Desc  = "超过该距离不渲染",
+            Value = { Min = 60, Max = 800, Default = Config.ESPMaxDistance },
+            Step  = 10,
+            Callback = function(value)
+                Config.ESPMaxDistance = value
+            end,
+        })
+    end)
+
+    build(function()
+        ESPTab:Paragraph({
+            Title = "参考 Plus 1.94：Highlight 描边 + 头顶名字，随距离淡出。",
+            TextSize = 15,
+        })
+    end)
+end
+
+------------------------------------------------------------------------
+-- 其他功能页（Punch Aim / 自动化 / John Doe / 体力 / Noli / 视觉 / 杂项）
+------------------------------------------------------------------------
+
+local function makeTab(title, icon)
+    local ok, tab = pcall(function()
+        return Window:Tab({ Title = title, Icon = icon })
+    end)
+    if ok and tab then return tab end
+    local ok2, tab2 = pcall(function()
+        return Window:Tab({ Title = title })
+    end)
+    if ok2 then return tab2 end
+    return nil
+end
+
+local TabAim = makeTab("Punch Aim", "target-bold")
+if TabAim then
+    build(function()
+        TabAim:Toggle({
+            Title = "Punch 自瞄",
+            Desc  = "点击 Punch 时自动转向最近的杀手",
+            Value = Config.PunchAim,
+            Callback = function(value)
+                Config.PunchAim = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Slider({
+            Title = "自瞄时长 (秒)",
+            Desc  = "锁定目标的持续时间",
+            Value = { Min = 0.1, Max = 2, Default = Config.PunchAimDuration },
+            Step  = 0.05,
+            Callback = function(value)
+                Config.PunchAimDuration = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Slider({
+            Title = "自瞄范围 (格)",
+            Desc  = "只找这个距离内的杀手",
+            Value = { Min = 5, Max = 100, Default = Config.PunchAimRange },
+            Step  = 1,
+            Callback = function(value)
+                Config.PunchAimRange = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Toggle({
+            Title = "锁定摄像机",
+            Desc  = "自瞄期间接管视角，打得更准",
+            Value = Config.AimCamLock,
+            Callback = function(value)
+                Config.AimCamLock = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Toggle({
+            Title = "Auto Punch",
+            Desc  = "检测到 Punch 亮起时自动出拳",
+            Value = Config.AutoPunch,
+            Callback = function(value)
+                Config.AutoPunch = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Slider({
+            Title = "自动出拳范围 (格)",
+            Desc  = "只打这个距离内的杀手",
+            Value = { Min = 3, Max = 50, Default = Config.AutoPunchRange },
+            Step  = 1,
+            Callback = function(value)
+                Config.AutoPunchRange = value
+            end,
+        })
+    end)
+    build(function()
+        TabAim:Paragraph({
+            Title = "快捷键：E / Q / F / R / 1 / 2 / 3 / 4",
+            TextSize = 15,
+        })
+    end)
+end
+
+local TabHDT = makeTab("HDT", "move")
+if TabHDT then
+    build(function()
+        TabHDT:Toggle({
+            Title = "智能格挡 (HDT)",
+            Desc  = "监测到本地格挡动画 ID 就冲向最近杀手并锁死",
+            Value = Config.SmartBlock,
+            Callback = function(value)
+                Config.SmartBlock = value
+            end,
+        })
+    end)
+    build(function()
+        TabHDT:Slider({
+            Title = "触发范围 (格)",
+            Value = { Min = 5, Max = 40, Default = Config.SmartBlockRange },
+            Step  = 1,
+            Callback = function(value)
+                Config.SmartBlockRange = value
+            end,
+        })
+    end)
+    build(function()
+        TabHDT:Slider({
+            Title = "冲刺速度",
+            Value = { Min = 1, Max = 30, Default = Config.SmartBlockDash },
+            Step  = 1,
+            Callback = function(value)
+                Config.SmartBlockDash = value
+            end,
+        })
+    end)
+    build(function()
+        TabHDT:Slider({
+            Title = "持续时间 (秒)",
+            Value = { Min = 0.3, Max = 3, Default = Config.SmartBlockHold },
+            Step  = 0.1,
+            Callback = function(value)
+                Config.SmartBlockHold = value
+            end,
+        })
+    end)
+    build(function()
+        TabHDT:Paragraph({
+            Title = "实时监测本地动画 ID（11 个）\n命中才触发，不依赖按钮/冷却",
+            TextSize = 15,
+        })
+    end)
+end
+
+local TabAuto = makeTab("Automation", "bolt-bold")
+if TabAuto then
+    build(function()
+        TabAuto:Toggle({
+            Title = "自动发电机解谜",
+            Desc  = "只在 PuzzleUI 打开时发包，界面一关立刻停（防踢）",
+            Value = Config.GenEnabled,
+            Callback = function(value)
+                Config.GenEnabled = value
+            end,
+        })
+    end)
+    build(function()
+        TabAuto:Slider({
+            Title = "解谜冷却 (秒)",
+            Value = { Min = 1, Max = 8, Default = Config.GenCooldown },
+            Step  = 0.25,
+            Callback = function(value)
+                Config.GenCooldown = value
+            end,
+        })
+    end)
+    build(function()
+        TabAuto:Toggle({
+            Title = "无人时加速",
+            Desc  = "32 格内没人时用 1.5 秒冷却",
+            Value = Config.GenSpeedUp,
+            Callback = function(value)
+                Config.GenSpeedUp = value
+            end,
+        })
+    end)
+    build(function()
+        TabAuto:Toggle({
+            Title = "Auto Disarm",
+            Desc  = "QTE 直接完成（需要 hookfunction）",
+            Value = Config.GenDisarm,
+            Callback = function(value)
+                Config.GenDisarm = value
+            end,
+        })
+    end)
+end
+
+local TabJD = makeTab("John Doe", "pocket-knife")
+if TabJD then
+    build(function()
+        TabJD:Toggle({
+            Title = "关闭拖尾伤害",
+            Value = Config.JDTrails,
+            Callback = function(value) Config.JDTrails = value end,
+        })
+    end)
+    build(function()
+        TabJD:Toggle({
+            Title = "关闭脚印伤害",
+            Value = Config.JDFootprints,
+            Callback = function(value) Config.JDFootprints = value end,
+        })
+    end)
+    build(function()
+        TabJD:Toggle({
+            Title = "缩小尖刺碰撞",
+            Value = Config.JDSpikes,
+            Callback = function(value) Config.JDSpikes = value end,
+        })
+    end)
+end
+
+local TabStam = makeTab("Stamina", "battery-charge-bold")
+if TabStam then
+    build(function()
+        TabStam:Dropdown({
+            Title = "体力预设",
+            Values = { "Original", "Realistic", "Semi-Realistic", "Infinite" },
+            Value = Config.StamPreset,
+            Callback = function(value)
+                if type(value) == "table" then value = value[1] end
+                Config.StamPreset = value
+            end,
+        })
+    end)
+end
+
+local TabNoli = makeTab("Noli", "eye-off")
+if TabNoli then
+    build(function()
+        TabNoli:Toggle({
+            Title = "隐藏假 NPC 和声音",
+            Desc  = "移走 Noli 假人并删掉 FakeLayer 声音",
+            Value = Config.NoliNPC,
+            Callback = function(value)
+                Config.NoliNPC = value
+            end,
+        })
+    end)
+    build(function()
+        TabNoli:Toggle({
+            Title = "防假计时器",
+            Desc  = "用真实 TimeLeft 覆盖界面时间",
+            Value = Config.NoliTimer,
+            Callback = function(value)
+                Config.NoliTimer = value
+            end,
+        })
+    end)
+end
+
+local TabVisual = makeTab("Visuals", "sun-bold")
+if TabVisual then
+    build(function()
+        TabVisual:Slider({
+            Title = "POV / FOV",
+            Desc  = "扩展视野，70 = 原版",
+            Value = { Min = 70, Max = 120, Default = Config.FOV },
+            Step  = 5,
+            Callback = function(value)
+                Config.FOV = value
+            end,
+        })
+    end)
+    build(function()
+        TabVisual:Toggle({
+            Title = "FPS + Ping",
+            Desc  = "右上角实时帧率和延迟",
+            Value = Config.FPSPing,
+            Callback = function(value)
+                Config.FPSPing = value
+                pcall(setFPSPing, value)
+            end,
+        })
+    end)
+    build(function()
+        TabVisual:Toggle({
+            Title = "显示聊天框",
+            Value = Config.ShowChat,
+            Callback = function(value)
+                Config.ShowChat = value
+            end,
+        })
+    end)
+end
+
+local TabMisc = makeTab("Misc", "settings-bold")
+if TabMisc then
+    build(function()
+        TabMisc:Dropdown({
+            Title = "设备伪装",
+            Values = { "Original", "PC", "Mobile", "Console", "Nothing" },
+            Value = Config.DeviceSpoof,
+            Callback = function(value)
+                if type(value) == "table" then value = value[1] end
+                Config.DeviceSpoof = value
+                pcall(applyDeviceSpoof)
+            end,
+        })
+    end)
+    build(function()
+        TabMisc:Button({
+            Title = "立即保存配置",
+            Callback = function()
+                saveConfig(true)
+                notify("配置", canSave and "已保存" or "执行器不支持 writefile")
+            end,
+        })
+    end)
+    build(function()
+        TabMisc:Paragraph({
+            Title = "TURNopensource · " .. AUTHOR .. "\n配置会自动保存/读取",
+            TextSize = 15,
+        })
+    end)
+end
+
+pcall(function()
+    Tab:Select()
+end)
+
+------------------------------------------------------------------------
+-- 运行时
+------------------------------------------------------------------------
+
+local connections = {}
+
+connections[#connections + 1] = RunService.RenderStepped:Connect(function(dt)
+    if destroyed then return end
+    for _, ring in pairs(rings) do
+        ring:Update(dt)
+    end
+    pcall(updateFaceCones)
+end)
+
+connections[#connections + 1] = RunService.RenderStepped:Connect(function()
+    if destroyed then return end
+    pcall(punchAimTick)
+end)
+
+pcall(setFPSPing, Config.FPSPing)
+
+task.spawn(function()
+    while not destroyed do
+        saveConfig(false)
+        task.wait(3)
+    end
+end)
+
+-- 运行时新加的 Sound / Animator（攻击音效常常是临时生成的）
+connections[#connections + 1] = Workspace.DescendantAdded:Connect(function(instance)
+    if destroyed then return end
+
+    pcall(function()
+        if instance:IsA("Sound") then
+            local id = soundIdOf(instance)
+            if id and SOUND_BLOCK_IDS[id] then
+                watchSound(instance)
+            end
+        elseif instance:IsA("Animator") then
+            local model = findOwnerModel(instance)
+            if model then
+                hookAnimator(model, instance)
+            end
+        end
+    end)
+end)
+
+pcall(scanDetection)
+pcall(updateESP)
+
+-- SoundService 里的全局音效也要纳入监听
+pcall(function()
+    for _, descendant in ipairs(game:GetService("SoundService"):GetDescendants()) do
+        if descendant:IsA("Sound") then
+            watchSound(descendant)
+        end
+    end
+end)
+
+-- workspace 里预放好的 Sounds 文件夹（只递归 Folder，避免遍历整张地图）
+pcall(function()
+    local function scanSoundFolders(node, depth)
+        if depth > 3 then return end
+        for _, child in ipairs(node:GetChildren()) do
+            if child:IsA("Sound") then
+                watchSound(child)
+            elseif child:IsA("Folder") or child:IsA("Configuration") then
+                scanSoundFolders(child, depth + 1)
+            end
+        end
+    end
+    scanSoundFolders(Workspace, 0)
+end)
+
+task.spawn(function()
+    while not destroyed do
+        pcall(scanDetection)
+        task.wait(0.4)
+    end
+end)
+
+task.spawn(function()
+    while not destroyed do
+        pcall(updateESP)
+        task.wait(0.2)
+    end
+end)
+
+local lastStatus = ""
+
+task.spawn(function()
+    while not destroyed do
+        local targets = getTargetsInRange(Config.Radius)
+        inRange = #targets
+
+        if statusTag then
+            local text = string.format("%d studs · %d in range",
+                math.floor(Config.Radius + 0.5), inRange)
+            if text ~= lastStatus then
+                lastStatus = text
+                pcall(function()
+                    statusTag:SetTitle(text)
+                end)
+            end
+        end
+
+        task.wait(0.3)
+    end
+end)
+
+------------------------------------------------------------------------
+-- 对外接口
+------------------------------------------------------------------------
+
+function TURN.Block(target, reason)
+    -- target 省略时直接发一次 Block；给出目标时仍要求目标在白圈内。
+    if target then
+        return triggerBlock(target, reason or "api")
+    end
+    return fireBlockAbility()
+end
+
+function TURN.GetTargets()
+    return getTargetsInRange(Config.Radius)
+end
+
+function TURN.TestBlock()
+    return fireBlockAbility()
+end
+
+function TURN.IsArmed()
+    return Config.AutoBlock
+end
+
+TURN.Window = Window
+TURN.Tab = Tab
+TURN.Rings = rings
+TURN.ESP = ESP
+TURN.UIErrors = uiErrors
+
+function TURN.Destroy()
+    if destroyed then return end
+    destroyed = true
+
+    for _, connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    connections = {}
+
+    pcall(saveConfig, true)
+    pcall(stopHDT)
+    if hdtScanConn then
+        pcall(function() hdtScanConn:Disconnect() end)
+    end
+    pcall(restoreAimState)
+    pcall(function() setFPSPing(false) end)
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local fpsGui = playerGui and playerGui:FindFirstChild("TURN_v1_FPSPing")
+    if fpsGui then fpsGui:Destroy() end
+
+    pcall(clearESP)
+
+    for model, ring in pairs(rings) do
+        pcall(function() ring:Destroy() end)
+        rings[model] = nil
+    end
+
+    for model, cone in pairs(faceCones) do
+        for _, part in ipairs(cone.Lines) do
+            pcall(function() part:Destroy() end)
+        end
+        for _, part in ipairs(cone.Tips) do
+            pcall(function() part:Destroy() end)
+        end
+        faceCones[model] = nil
+    end
+
+    pcall(function() Window:Destroy() end)
+
+    if getgenv and getgenv().TURNopensource == TURN then
+        getgenv().TURNopensource = nil
+    end
+end
+
+if getgenv then
+    getgenv().TURNopensource = TURN
+end
+pcall(function()
+    _G.TURNopensource = TURN
+end)
+
+print(string.format("[%s] loaded · WindUI %s", SCRIPT_NAME, tostring(WindUI.Version)))
+
+task.delay(0.4, function()
+    if destroyed then return end
+    notify(SCRIPT_NAME, "Auto block + ESP 已加载 · " .. AUTHOR)
+end)
